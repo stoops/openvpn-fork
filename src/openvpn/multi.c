@@ -436,6 +436,9 @@ multi_init(struct context *t)
     }
 
     m->deferred_shutdown_signal.signal_received = 0;
+
+    m->bulk_pend = calloc(TUN_BAT_MAX, sizeof(struct multi_instance *));
+    m->bulk_leng = 0;
 }
 
 const char *
@@ -652,6 +655,8 @@ multi_close_instance(struct multi_context *m, struct multi_instance *mi, bool sh
         mbuf_dereference_instance(m->mbuf, mi);
     }
 
+    mi->bulk_indx = -1;
+
 #ifdef ENABLE_MANAGEMENT
     set_cc_config(mi, NULL);
 #endif
@@ -722,6 +727,9 @@ multi_uninit(struct multi_context *m)
         multi_reap_free(m->reaper);
         mroute_helper_free(m->route_helper);
         multi_io_free(m->multi_io);
+
+        m->bulk_leng = 0;
+        free(m->bulk_pend);
     }
 }
 
@@ -807,6 +815,8 @@ multi_create_instance(struct multi_context *m, const struct mroute_addr *real,
 
     mi->ev_arg.type = EVENT_ARG_MULTI_INSTANCE;
     mi->ev_arg.u.mi = mi;
+
+    mi->bulk_indx = -1;
 
     perf_pop();
     gc_free(&gc);
@@ -3414,6 +3424,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
                 }
 
                 process_incoming_link_part2(c, lsi, orig_buf);
+                process_incoming_link_part3(c);
             }
             perf_pop();
 
@@ -3547,7 +3558,7 @@ multi_process_incoming_link(struct multi_context *m, struct multi_instance *inst
  * i.e. server -> client direction.
  */
 bool
-multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags)
+multi_process_incoming_tun_part2(struct multi_context *m, const unsigned int mpp_flags)
 {
     bool ret = true;
 
@@ -3558,9 +3569,7 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
         const int dev_type = TUNNEL_TYPE(m->top.c1.tuntap);
         int16_t vid = 0;
 
-#ifdef MULTI_DEBUG_EVENT_LOOP
-        printf("TUN -> TCP/UDP [%d]\n", BLEN(&m->top.c2.buf));
-#endif
+        msg(D_MULTI_DEBUG, "TUN -> TCP/UDP [%d]", BLEN(&m->top.c2.buf));
 
         if (m->pending)
         {
@@ -3592,6 +3601,27 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
             {
                 /* for now, treat multicast as broadcast */
                 multi_bcast(m, &m->top.c2.buf, NULL, vid);
+            }
+            else if (m->bulk_indx == -9)
+            {
+                struct multi_instance *inst = multi_get_instance_by_virtual_addr(m, &dest, dev_type == DEV_TYPE_TUN);
+                if (inst)
+                {
+                    int leng = m->bulk_leng;
+                    for (int x = 0; x < leng; ++x)
+                    {
+                        if (m->bulk_pend[x] == inst)
+                        {
+                            m->bulk_indx = x;
+                            return true;
+                        }
+                    }
+                    if (leng < 0) { leng = 0; }
+                    m->bulk_pend[leng] = inst;
+                    m->bulk_indx = leng;
+                    m->bulk_leng = (leng + 1);
+                }
+                return true;
             }
             else
             {
@@ -3632,6 +3662,79 @@ multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags
         }
     }
     return ret;
+}
+
+bool multi_process_post_part2(struct multi_context *m, const unsigned int mpp_flags)
+{
+    int flag = 0;
+    for (int x = 0; x < m->bulk_leng; ++x)
+    {
+        struct multi_instance *i = m->bulk_pend[x];
+        if (i)
+        {
+            if (!(multi_output_queue_ready(m, i)))
+            {
+                flag = 1;
+                continue;
+            }
+            m->pending = i;
+            set_prefix(m->pending);
+            multi_process_post(m, m->pending, mpp_flags);
+            clear_prefix();
+            m->bulk_pend[x] = NULL;
+            return true;
+        }
+    }
+    if (flag == 0) { m->bulk_leng = 0; }
+    return false;
+}
+
+bool multi_process_incoming_tun_part3(struct multi_context *m, const unsigned int mpp_flags)
+{
+    bool ret = false;
+    struct context *c, *b = &m->top;
+    struct multi_instance *i;
+    int leng = (b->c2.buffers->bulk_indx + 1);
+    m->bulk_leng = 0;
+    for (int x = 0; x < leng; ++x)
+    {
+        m->bulk_indx = -9;
+        m->top.c2.buf = b->c2.bufs[x];
+        multi_process_incoming_tun_part2(m, mpp_flags);
+        if (m->bulk_indx > -1)
+        {
+            i = m->bulk_pend[m->bulk_indx];
+            c = &(i->context);
+            if (i->bulk_indx < 0)
+            {
+                c->c2.buffers->bulk_indx = -1;
+                i->bulk_indx = x;
+            }
+            int j = (c->c2.buffers->bulk_indx + 1);
+            if (j < 0) { j = 0; }
+            if (j >= TUN_BAT_MIN) { j = (TUN_BAT_MIN - 1); }
+            c->c2.bufs[j] = b->c2.bufs[x];
+        }
+    }
+    for (int x = 0; x < m->bulk_leng; ++x)
+    {
+        i = m->bulk_pend[m->bulk_indx];
+        c = &(i->context);
+        process_incoming_tun(c, c->c2.link_sockets[0]);
+        i->bulk_indx = -1;
+    }
+    b->c2.buffers->bulk_indx = -1;
+    ret = multi_process_post_part2(m, mpp_flags);
+    return ret;
+}
+
+bool multi_process_incoming_tun(struct multi_context *m, const unsigned int mpp_flags)
+{
+    if (!(m->top.options.ce.bulk_mode)) {
+        return multi_process_incoming_tun_part2(m, mpp_flags);
+    } else {
+        return multi_process_incoming_tun_part3(m, mpp_flags);
+    }
 }
 
 /*
