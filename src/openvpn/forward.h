@@ -332,6 +332,13 @@ void process_ip_header(struct context *c, unsigned int flags, struct buffer *buf
 
 bool schedule_exit(struct context *c);
 
+
+void *read_tun_out_link(void *argv);
+void *read_link_out_tun(void *argv);
+void threaded_init(struct context_pointer *p, struct context *c, struct multi_threaded *m);
+void threaded_io(struct context *c, struct link_socket *sock, struct context_pointer *cpmt);
+
+
 static inline struct link_socket_info *
 get_link_socket_info(struct context *c)
 {

@@ -384,6 +384,7 @@ struct context_2
     struct buffer to_tun;
     struct buffer to_link;
 
+    struct buffer buf2;
     struct buffer bufs[TUN_BAT_MAX];
 
     /* should we print R|W|r|w to console on packet transfers? */
@@ -469,6 +470,20 @@ struct context_2
 };
 
 
+struct multi_threaded
+{
+    int stat;
+    int read_tun_out_link_inpt[2];
+    int read_tun_out_link_outp[2];
+    int read_tun_out_link_wait;
+    pthread_t read_tun_out_link_thread;
+    int read_link_out_tun_inpt[2];
+    int read_link_out_tun_outp[2];
+    int read_link_out_tun_wait;
+    pthread_t read_link_out_tun_thread;
+};
+
+
 /**
  * Contains all state information for one tunnel.
  *
@@ -526,6 +541,14 @@ struct context
     struct context_1 c1;  /**< Level 1 %context. */
     struct context_2 c2;  /**< Level 2 %context. */
 };
+
+
+struct context_pointer
+{
+    struct context *context_pointer_multi_threaded;
+    struct multi_threaded *multi_threaded_pointer_object;
+};
+
 
 /*
  * Check for a signal when inside an event loop

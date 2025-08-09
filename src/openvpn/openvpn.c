@@ -56,6 +56,8 @@ process_signal_p2p(struct context *c)
 static void
 tunnel_point_to_point(struct context *c)
 {
+    struct multi_threaded mtio;
+    struct context_pointer cpmt;
     context_clear_2(c);
 
     /* set point-to-point mode */
@@ -67,6 +69,11 @@ tunnel_point_to_point(struct context *c)
     if (IS_SIG(c))
     {
         return;
+    }
+
+    mtio.stat = 1;
+    if (mtio.stat == 1) {
+        threaded_init(&(cpmt), c, &(mtio));
     }
 
     /* main event loop */
@@ -90,7 +97,13 @@ tunnel_point_to_point(struct context *c)
         }
 
         /* process the I/O which triggered select */
+        if (mtio.stat == 1) {
+        cpmt.context_pointer_multi_threaded = c;
+        cpmt.multi_threaded_pointer_object = &(mtio);
+        threaded_io(c, c->c2.link_sockets[0], &(cpmt));
+        } else {
         process_io(c, c->c2.link_sockets[0]);
+        }
         P2P_CHECK_SIG();
 
         perf_pop();
@@ -102,6 +115,10 @@ tunnel_point_to_point(struct context *c)
 
     /* tear down tunnel instance (unless --persist-tun) */
     close_instance(c);
+
+    if (mtio.stat == 1) {
+    /* todo close thread fdnos and join calls */
+    }
 }
 
 #undef PROCESS_SIGNAL_P2P

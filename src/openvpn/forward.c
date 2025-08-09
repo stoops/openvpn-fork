@@ -47,7 +47,9 @@
 #include "mstats.h"
 
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <pthread.h>
 
 counter_type link_read_bytes_global;  /* GLOBAL */
 counter_type link_write_bytes_global; /* GLOBAL */
@@ -928,7 +930,7 @@ socks_postprocess_incoming_link(struct context *c, struct link_socket *sock)
 {
     if (sock->socks_proxy && sock->info.proto == PROTO_UDP)
     {
-        socks_process_incoming_udp(&c->c2.buf, &c->c2.from);
+        socks_process_incoming_udp(&c->c2.buf2, &c->c2.from);
     }
 }
 
@@ -974,10 +976,10 @@ read_incoming_link(struct context *c, struct link_socket *sock)
 
     perf_push(PERF_READ_IN_LINK);
 
-    c->c2.buf = c->c2.buffers->read_link_buf;
-    ASSERT(buf_init(&c->c2.buf, c->c2.frame.buf.headroom));
+    c->c2.buf2 = c->c2.buffers->read_link_buf;
+    ASSERT(buf_init(&c->c2.buf2, c->c2.frame.buf.headroom));
 
-    status = link_socket_read(sock, &c->c2.buf, &c->c2.from);
+    status = link_socket_read(sock, &c->c2.buf2, &c->c2.from);
 
     if (socket_connection_reset(sock, status))
     {
@@ -1033,21 +1035,21 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
     struct gc_arena gc = gc_new();
     bool decrypt_status = false;
 
-    if (c->c2.buf.len > 0)
+    if (c->c2.buf2.len > 0)
     {
-        c->c2.link_read_bytes += c->c2.buf.len;
-        link_read_bytes_global += c->c2.buf.len;
+        c->c2.link_read_bytes += c->c2.buf2.len;
+        link_read_bytes_global += c->c2.buf2.len;
 #ifdef ENABLE_MEMSTATS
         if (mmap_stats)
         {
             mmap_stats->link_read_bytes = link_read_bytes_global;
         }
 #endif
-        c->c2.original_recv_size = c->c2.buf.len;
+        c->c2.original_recv_size = c->c2.buf2.len;
 #ifdef ENABLE_MANAGEMENT
         if (management)
         {
-            management_bytes_client(management, c->c2.buf.len, 0);
+            management_bytes_client(management, c->c2.buf2.len, 0);
             management_bytes_server(management, &c->c2.link_read_bytes, &c->c2.link_write_bytes,
                                     &c->c2.mda_context);
         }
@@ -1064,22 +1066,22 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
     {
         if (!ask_gremlin(c->options.gremlin))
         {
-            c->c2.buf.len = 0;
+            c->c2.buf2.len = 0;
         }
-        corrupt_gremlin(&c->c2.buf, c->options.gremlin);
+        corrupt_gremlin(&c->c2.buf2, c->options.gremlin);
     }
 #endif
 
     /* log incoming packet */
 #ifdef LOG_RW
-    if (c->c2.log_rw && c->c2.buf.len > 0)
+    if (c->c2.log_rw && c->c2.buf2.len > 0)
     {
         fprintf(stderr, "R");
     }
 #endif
 
     msg(D_LINK_RW, "%s READ [%d] from %s: %s", proto2ascii(lsi->proto, lsi->af, true),
-        BLEN(&c->c2.buf), print_link_socket_actual(&c->c2.from, &gc), PROTO_DUMP(&c->c2.buf, &gc));
+        BLEN(&c->c2.buf2), print_link_socket_actual(&c->c2.from, &gc), PROTO_DUMP(&c->c2.buf2, &gc));
 
     /*
      * Good, non-zero length packet received.
@@ -1088,18 +1090,18 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
      * If any stage fails, it sets buf.len to 0 or -1,
      * telling downstream stages to ignore the packet.
      */
-    if (c->c2.buf.len > 0)
+    if (c->c2.buf2.len > 0)
     {
         struct crypto_options *co = NULL;
         const uint8_t *ad_start = NULL;
-        if (!link_socket_verify_incoming_addr(&c->c2.buf, lsi, &c->c2.from))
+        if (!link_socket_verify_incoming_addr(&c->c2.buf2, lsi, &c->c2.from))
         {
-            link_socket_bad_incoming_addr(&c->c2.buf, lsi, &c->c2.from);
+            link_socket_bad_incoming_addr(&c->c2.buf2, lsi, &c->c2.from);
         }
 
         if (c->c2.tls_multi)
         {
-            uint8_t opcode = *BPTR(&c->c2.buf) >> P_OPCODE_SHIFT;
+            uint8_t opcode = *BPTR(&c->c2.buf2) >> P_OPCODE_SHIFT;
 
             /*
              * If DCO is enabled, the kernel drivers require that the
@@ -1113,7 +1115,7 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
             {
                 msg(D_LINK_ERRORS, "Data Channel Offload doesn't support DATA_V1 packets. "
                                    "Upgrade your server to 2.4.5 or newer.");
-                c->c2.buf.len = 0;
+                c->c2.buf2.len = 0;
             }
 
             /*
@@ -1126,7 +1128,7 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
              * will load crypto_options with the correct encryption key
              * and return false.
              */
-            if (tls_pre_decrypt(c->c2.tls_multi, &c->c2.from, &c->c2.buf, &co, floated, &ad_start))
+            if (tls_pre_decrypt(c->c2.tls_multi, &c->c2.from, &c->c2.buf2, &co, floated, &ad_start))
             {
                 interval_action(&c->c2.tmp_int);
 
@@ -1149,12 +1151,12 @@ process_incoming_link_part1(struct context *c, struct link_socket_info *lsi, boo
          */
         if (c->c2.tls_multi && c->c2.tls_multi->multi_state < CAS_CONNECT_DONE)
         {
-            c->c2.buf.len = 0;
+            c->c2.buf2.len = 0;
         }
 
         /* authenticate and decrypt the incoming packet */
         decrypt_status =
-            openvpn_decrypt(&c->c2.buf, c->c2.buffers->decrypt_buf, co, &c->c2.frame, ad_start);
+            openvpn_decrypt(&c->c2.buf2, c->c2.buffers->decrypt_buf, co, &c->c2.frame, ad_start);
 
         if (!decrypt_status
             /* on the instance context we have only one socket, so just check the first one */
@@ -1179,12 +1181,12 @@ void
 process_incoming_link_part2(struct context *c, struct link_socket_info *lsi,
                             const uint8_t *orig_buf)
 {
-    if (c->c2.buf.len > 0)
+    if (c->c2.buf2.len > 0)
     {
 #ifdef ENABLE_FRAGMENT
         if (c->c2.fragment)
         {
-            fragment_incoming(c->c2.fragment, &c->c2.buf, &c->c2.frame_fragment);
+            fragment_incoming(c->c2.fragment, &c->c2.buf2, &c->c2.frame_fragment);
         }
 #endif
 
@@ -1192,14 +1194,14 @@ process_incoming_link_part2(struct context *c, struct link_socket_info *lsi,
         /* decompress the incoming packet */
         if (c->c2.comp_context)
         {
-            (*c->c2.comp_context->alg.decompress)(&c->c2.buf, c->c2.buffers->decompress_buf,
+            (*c->c2.comp_context->alg.decompress)(&c->c2.buf2, c->c2.buffers->decompress_buf,
                                                   c->c2.comp_context, &c->c2.frame);
         }
 #endif
 
 #ifdef PACKET_TRUNCATION_CHECK
-        /* if (c->c2.buf.len > 1) --c->c2.buf.len; */
-        ipv4_packet_size_verify(BPTR(&c->c2.buf), BLEN(&c->c2.buf), TUNNEL_TYPE(c->c1.tuntap),
+        /* if (c->c2.buf2.len > 1) --c->c2.buf2.len; */
+        ipv4_packet_size_verify(BPTR(&c->c2.buf2), BLEN(&c->c2.buf2), TUNNEL_TYPE(c->c1.tuntap),
                                 "POST_DECRYPT", &c->c2.n_trunc_post_decrypt);
 #endif
 
@@ -1212,39 +1214,39 @@ process_incoming_link_part2(struct context *c, struct link_socket_info *lsi,
          *
          * Also, update the persisted version of our packet-id.
          */
-        if (!TLS_MODE(c) && c->c2.buf.len > 0)
+        if (!TLS_MODE(c) && c->c2.buf2.len > 0)
         {
             link_socket_set_outgoing_addr(lsi, &c->c2.from, NULL, c->c2.es);
         }
 
         /* reset packet received timer */
-        if (c->options.ping_rec_timeout && c->c2.buf.len > 0)
+        if (c->options.ping_rec_timeout && c->c2.buf2.len > 0)
         {
             event_timeout_reset(&c->c2.ping_rec_interval);
         }
 
         /* increment authenticated receive byte count */
-        if (c->c2.buf.len > 0)
+        if (c->c2.buf2.len > 0)
         {
-            c->c2.link_read_bytes_auth += c->c2.buf.len;
+            c->c2.link_read_bytes_auth += c->c2.buf2.len;
             c->c2.max_recv_size_local =
                 max_int(c->c2.original_recv_size, c->c2.max_recv_size_local);
         }
 
         /* Did we just receive an openvpn ping packet? */
-        if (is_ping_msg(&c->c2.buf))
+        if (is_ping_msg(&c->c2.buf2))
         {
             dmsg(D_PING, "RECEIVED PING PACKET");
-            c->c2.buf.len = 0; /* drop packet */
+            c->c2.buf2.len = 0; /* drop packet */
         }
 
         /* Did we just receive an OCC packet? */
-        if (is_occ_msg(&c->c2.buf))
+        if (is_occ_msg(&c->c2.buf2))
         {
             process_received_occ_msg(c);
         }
 
-        buffer_turnover(orig_buf, &c->c2.to_tun, &c->c2.buf, &c->c2.buffers->read_link_buf);
+        buffer_turnover(orig_buf, &c->c2.to_tun, &c->c2.buf2, &c->c2.buffers->read_link_buf);
 
         /* to_tun defined + unopened tuntap can cause deadlock */
         if (!tuntap_defined(c->c1.tuntap))
@@ -1260,16 +1262,16 @@ process_incoming_link_part2(struct context *c, struct link_socket_info *lsi,
 
 void process_incoming_link_part3(struct context *c)
 {
-    int leng = BLEN(&c->c2.buf);
+    int leng = BLEN(&c->c2.buf2);
     if (leng > 0)
     {
         if (check_bulk_mode(c))
         {
             c->c2.buffers->send_tun_max.offset = TUN_BAT_OFF;
             c->c2.buffers->send_tun_max.len = leng;
-            bcopy(BPTR(&c->c2.buf), BPTR(&c->c2.buffers->send_tun_max), leng);
+            bcopy(BPTR(&c->c2.buf2), BPTR(&c->c2.buffers->send_tun_max), leng);
             c->c2.to_tun.offset += 2;
-            c->c2.buf.offset += 2;
+            c->c2.buf2.offset += 2;
         }
     }
     else
@@ -1284,7 +1286,7 @@ process_incoming_link(struct context *c, struct link_socket *sock)
     perf_push(PERF_PROC_IN_LINK);
 
     struct link_socket_info *lsi = &sock->info;
-    const uint8_t *orig_buf = c->c2.buf.data;
+    const uint8_t *orig_buf = c->c2.buf2.data;
 
     process_incoming_link_part1(c, lsi, false);
     process_incoming_link_part2(c, lsi, orig_buf);
@@ -2582,6 +2584,181 @@ process_io(struct context *c, struct link_socket *sock)
         }
     }
     else if (status & DCO_READ)
+    {
+        if (!IS_SIG(c))
+        {
+            process_incoming_dco(c);
+        }
+    }
+}
+
+void *read_link_out_tun(void *argv)
+{
+    struct context_pointer *cpmt = (struct context_pointer *)argv;
+    int *inpt = cpmt->multi_threaded_pointer_object->read_link_out_tun_inpt;
+    int *outp = cpmt->multi_threaded_pointer_object->read_link_out_tun_outp;
+    int leng;
+    uint8_t temp[8];
+
+    while (true)
+    {
+        leng = read(inpt[0], temp, 1);
+        if (leng < 1) { break; }
+
+        struct context *c = cpmt->context_pointer_multi_threaded;
+        struct link_socket *sock = c->c2.link_sockets[0];
+
+        const unsigned int status = c->c2.event_set_status;
+        dmsg(M_INFO, "MTIO MODE read_link_out_tun [%d] [%d][%d]", status, TUN_WRITE, SOCKET_READ);
+
+        /* TUN device ready to accept write */
+        if (status & TUN_WRITE)
+        {
+            process_outgoing_tun(c, sock);
+        }
+        /* Incoming data on TCP/UDP port */
+        else if (status & SOCKET_READ)
+        {
+            read_incoming_link(c, sock);
+            if (!IS_SIG(c))
+            {
+                process_incoming_link(c, sock);
+            }
+        }
+
+        leng = write(outp[1], temp, 1);
+    }
+
+    return NULL;
+}
+
+void *read_tun_out_link(void *argv)
+{
+    struct context_pointer *cpmt = (struct context_pointer *)argv;
+    int *inpt = cpmt->multi_threaded_pointer_object->read_tun_out_link_inpt;
+    int *outp = cpmt->multi_threaded_pointer_object->read_tun_out_link_outp;
+    int leng;
+    uint8_t temp[8];
+
+    while (true)
+    {
+        leng = read(inpt[0], temp, 1);
+        if (leng < 1) { break; }
+
+        struct context *c = cpmt->context_pointer_multi_threaded;
+        struct link_socket *sock = c->c2.link_sockets[0];
+
+        const unsigned int status = c->c2.event_set_status;
+        dmsg(M_INFO, "MTIO MODE read_tun_out_link [%d] [%d][%d]", status, SOCKET_WRITE, TUN_READ);
+
+        /* TCP/UDP port ready to accept write */
+        if (status & SOCKET_WRITE)
+        {
+            process_outgoing_link(c, sock);
+        }
+        /* Incoming data on TUN device */
+        else if (status & TUN_READ)
+        {
+            read_incoming_tun(c);
+            if (!IS_SIG(c))
+            {
+                process_incoming_tun(c, sock);
+            }
+        }
+
+        leng = write(outp[1], temp, 1);
+    }
+
+    return NULL;
+}
+
+void threaded_init(struct context_pointer *p, struct context *c, struct multi_threaded *m)
+{
+    p->context_pointer_multi_threaded = c;
+    p->multi_threaded_pointer_object = m;
+
+    socketpair(AF_UNIX, SOCK_DGRAM, 0, m->read_tun_out_link_inpt);
+    socketpair(AF_UNIX, SOCK_DGRAM, 0, m->read_tun_out_link_outp);
+    m->read_tun_out_link_wait = 0;
+    bzero(&(m->read_tun_out_link_thread), sizeof(pthread_t));
+    pthread_create(&(m->read_tun_out_link_thread), NULL, read_tun_out_link, p);
+
+    socketpair(AF_UNIX, SOCK_DGRAM, 0, m->read_link_out_tun_inpt);
+    socketpair(AF_UNIX, SOCK_DGRAM, 0, m->read_link_out_tun_outp);
+    m->read_link_out_tun_wait = 0;
+    bzero(&(m->read_link_out_tun_thread), sizeof(pthread_t));
+    pthread_create(&(m->read_link_out_tun_thread), NULL, read_link_out_tun, p);
+}
+
+void threaded_io(struct context *c, struct link_socket *sock, struct context_pointer *cpmt)
+{
+    int *rtol_inpt = cpmt->multi_threaded_pointer_object->read_tun_out_link_inpt;
+    int *rtol_outp = cpmt->multi_threaded_pointer_object->read_tun_out_link_outp;
+    int *rlot_inpt = cpmt->multi_threaded_pointer_object->read_link_out_tun_inpt;
+    int *rlot_outp = cpmt->multi_threaded_pointer_object->read_link_out_tun_outp;
+    int leng;
+    uint8_t temp[8];
+
+    const unsigned int status = c->c2.event_set_status;
+    dmsg(M_INFO, "MTIO MODE threaded_io a [%d] [%d][%d]", status, cpmt->multi_threaded_pointer_object->read_tun_out_link_wait, cpmt->multi_threaded_pointer_object->read_link_out_tun_wait);
+
+#ifdef ENABLE_MANAGEMENT
+    if (status & (MANAGEMENT_READ | MANAGEMENT_WRITE))
+    {
+        ASSERT(management);
+        management_io(management);
+    }
+#endif
+
+    int mxfd;
+    fd_set rfds;
+    struct timeval timo;
+
+    FD_ZERO(&rfds);
+    FD_SET(rtol_outp[0], &rfds);
+    FD_SET(rlot_outp[0], &rfds);
+    timo.tv_sec = 0;
+    timo.tv_usec = 0;
+    mxfd = (rtol_outp[0] > rlot_outp[0]) ? rtol_outp[0] : rlot_outp[0];
+    if ((cpmt->multi_threaded_pointer_object->read_tun_out_link_wait == 1) || (cpmt->multi_threaded_pointer_object->read_link_out_tun_wait == 1)) {
+        select(mxfd+1, &rfds, NULL, NULL, &timo);
+        if (FD_ISSET(rtol_outp[0], &rfds)) {
+            leng = read(rtol_outp[0], temp, 1);
+            if (leng < 1) { /* no-op */ }
+            cpmt->multi_threaded_pointer_object->read_tun_out_link_wait = 0;
+        }
+        if (FD_ISSET(rlot_outp[0], &rfds)) {
+            leng = read(rlot_outp[0], temp, 1);
+            if (leng < 1) { /* no-op */ }
+            cpmt->multi_threaded_pointer_object->read_link_out_tun_wait = 0;
+        }
+    }
+
+    dmsg(M_INFO, "MTIO MODE threaded_io b [%d] [%d][%d]", status, cpmt->multi_threaded_pointer_object->read_tun_out_link_wait, cpmt->multi_threaded_pointer_object->read_link_out_tun_wait);
+
+    /* TCP/UDP port ready to accept write */
+    /* Incoming data on TUN device */
+    if ((status & SOCKET_WRITE) || (status & TUN_READ))
+    {
+        if (cpmt->multi_threaded_pointer_object->read_tun_out_link_wait == 0) {
+            cpmt->multi_threaded_pointer_object->read_tun_out_link_wait = 1;
+            leng = write(rtol_inpt[1], temp, 1);
+            if (leng < 1) { /* no-op */ }
+        }
+    }
+
+    /* TUN device ready to accept write */
+    /* Incoming data on TCP/UDP port */
+    if ((status & TUN_WRITE) || (status & SOCKET_READ))
+    {
+        if (cpmt->multi_threaded_pointer_object->read_link_out_tun_wait == 0) {
+            cpmt->multi_threaded_pointer_object->read_link_out_tun_wait = 1;
+            leng = write(rlot_inpt[1], temp, 1);
+            if (leng < 1) { /* no-op */ }
+        }
+    }
+
+    if (status & DCO_READ)
     {
         if (!IS_SIG(c))
         {
