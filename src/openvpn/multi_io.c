@@ -294,7 +294,7 @@ multi_io_dispatch(struct multi_context *m, struct multi_instance *mi, const int 
     {
         case TA_INST_LENG:
         case TA_TUN_READ:
-            multi_in_tun(m, mpp_flags);
+            threaded_multi_inp_tun(m, mpp_flags);
             break;
 
         case TA_SOCKET_READ:
@@ -394,8 +394,9 @@ last:
 }
 
 void
-multi_io_process_io(struct multi_context *m)
+multi_io_process_io(struct thread_pointer *b)
 {
+    struct multi_context *m = b->p->m[b->i-1];
     struct multi_io *multi_io = m->multi_io;
     int i;
 
@@ -440,8 +441,8 @@ multi_io_process_io(struct multi_context *m)
                     if (!proto_is_dgram(ev_arg->u.sock->info.proto))
                     {
                         socket_reset_listen_persistent(ev_arg->u.sock);
-                        mi = multi_create_instance_tcp(m, ev_arg->u.sock);
-                        if (mi) { multi_io_action(m, mi, TA_INITIAL, false); }
+                        mi = multi_create_instance_tcp(b, ev_arg->u.sock);
+                        if (mi) { multi_io_action(b->p->p, mi, TA_INITIAL, false); }
                     }
                     else
                     {
@@ -483,11 +484,8 @@ multi_io_process_io(struct multi_context *m)
                     struct multi_instance *mi;
                     ASSERT(m->top.c2.link_sockets[0]);
                     socket_reset_listen_persistent(m->top.c2.link_sockets[0]);
-                    mi = multi_create_instance_tcp(m, m->top.c2.link_sockets[0]);
-                    if (mi)
-                    {
-                        multi_io_action(m, mi, TA_INITIAL, false);
-                    }
+                    mi = multi_create_instance_tcp(b, m->top.c2.link_sockets[0]);
+                    if (mi) { multi_io_action(b->p->p, mi, TA_INITIAL, false); }
                 }
 #if defined(ENABLE_DCO)
                 /* incoming data on DCO? */
@@ -524,6 +522,21 @@ multi_io_process_io(struct multi_context *m)
         {
             multi_io_action(m, mi, TA_SOCKET_WRITE, true);
         }
+    }
+
+    if (m->mtio_stat == 3)
+    {
+        for (int x = 0; x < m->max_clients; ++x)
+        {
+            struct multi_instance *j = m->instances[x];
+            if (!j) { continue; }
+            if (j->mtio_stat == 3)
+            {
+                multi_context_switch_addr(m, j, true, true);
+                j->mtio_stat = 5;
+            }
+        }
+        m->mtio_stat = 5;
     }
 }
 
