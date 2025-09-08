@@ -188,6 +188,11 @@ struct connection_entry
 
     /* Dual mode splits the core operations into two independent threads: link-read + tunn-send & tunn-read + link-send */
     bool dual_mode;
+
+    /* Buffer bloat buster mode */
+    bool bust_mode;
+    int bust_size;
+    char *bust_addr;
 };
 
 struct remote_entry
