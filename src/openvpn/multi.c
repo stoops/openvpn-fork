@@ -4776,7 +4776,7 @@ void threaded_tunnel_server(struct context *c, struct context *d)
     struct multi_address a[maxc];
     struct multi_link l[maxc];
     pthread_mutex_t lock;
-    pthread_t thrm, thrd[MAX_THREADS];
+    pthread_t thrb, thrm, thrd[MAX_THREADS];
 
     bzero(&(p), sizeof(struct context_pointer));
     p.i = 1; p.h = 1; p.n = maxt; p.x = maxc; p.z = 0;
@@ -4808,6 +4808,12 @@ void threaded_tunnel_server(struct context *c, struct context *d)
         pthread_create(&(thrd[x]), NULL, tunnel_server, &(b[x]));
     }
 
+    if (c->options.ce.bust_mode)
+    {
+        bzero(&(thrb), sizeof(pthread_t));
+        pthread_create(&(thrb), NULL, threaded_buffer_bloat_buster, &(b[0]));
+    }
+
     pthread_join(thrd[0], NULL);
 
     for (int x = 1; x < p.n; ++x)
@@ -4816,6 +4822,11 @@ void threaded_tunnel_server(struct context *c, struct context *d)
     }
 
     pthread_join(thrm, NULL);
+
+    if (c->options.ce.bust_mode)
+    {
+        pthread_join(thrb, NULL);
+    }
 
     free(p.m);
 }
