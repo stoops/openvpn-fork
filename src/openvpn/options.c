@@ -307,6 +307,7 @@ static const char usage_message[] =
     "--mtu-test      : Empirically measure and report MTU.\n"
     "--bulk-mode     : Use bulk TUN/TCP reads/writes.\n"
     "--mtio-mode     : Use multi threaded mode.\n"
+    "--bust-mode n a : Buffer bloat buster mode: n=kbps, a=ipv4.\n"
 #ifdef ENABLE_FRAGMENT
     "--fragment max  : Enable internal datagram fragmentation so that no UDP\n"
     "                  datagrams are sent which are larger than max bytes.\n"
@@ -9892,6 +9893,12 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     else if (streq(p[0], "mtio-mode"))
     {
         options->ce.mtio_mode = true;
+    }
+    else if (streq(p[0], "bust-mode") && p[1] && p[2])
+    {
+        options->ce.bust_mode = true;
+        options->ce.bust_size = positive_atoi(p[1], msglevel);;
+        options->ce.bust_addr = strdup(p[2]);
     }
     else
     {
