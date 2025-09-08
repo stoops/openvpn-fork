@@ -612,6 +612,7 @@ struct dual_args
 };
 
 void *threaded_io_management(void *a);
+void *threaded_buffer_bloat_buster(void *a);
 
 
 /*
