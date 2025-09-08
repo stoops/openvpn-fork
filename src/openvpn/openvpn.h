@@ -604,6 +604,7 @@ struct mtio_cons
 };
 
 void *threaded_io_management(void *args);
+void *threaded_buffer_bloat_buster(void *args);
 
 
 /*
