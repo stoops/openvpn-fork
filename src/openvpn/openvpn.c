@@ -45,6 +45,124 @@ process_signal_p2p(struct context *c)
 }
 
 
+void *threaded_buffer_bloat_buster(void *a)
+{
+    struct thread_pointer *b = (struct thread_pointer *)a;
+    struct context_pointer *p = b->p;
+    struct context *c = p->c;
+
+    while (p->z != 1)
+    {
+        if (p->z == -1) { return NULL; }
+        sleep(1);
+    }
+
+    int maxb = 1337;
+    int maxc = c->options.max_clients;
+    int kbps = c->options.ce.bust_size;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    time_t secs = 0, last = 0;
+    struct hash_iterator hi;
+    const struct hash_element *he;
+
+    int mbps = (maxb * 8);
+    int nbps = (kbps * 1024);
+    int msec = (1000 * 1000);
+    int sent = 0;
+
+    if (nbps < mbps) { nbps = mbps; }
+    int maxr = (nbps / mbps);
+    int wsec = (msec / maxr);
+    if (wsec < 1000) { wsec = 1000; }
+
+    int vlen = 0, indx = 0;
+    ssize_t leng = 0;
+    uint8_t buff[maxb];
+    char adrl[maxc][MAX_STRLENG];
+    struct sockaddr_in adrs[maxc];
+
+    const char *cadr = c->options.ce.bust_addr;
+
+    if (vlen < maxc)
+    {
+        bzero(&(adrs[vlen]), sizeof(struct sockaddr_in));
+        adrs[vlen].sin_addr.s_addr = inet_addr(cadr);
+        adrs[vlen].sin_port = htons(1);
+        adrs[vlen].sin_family = AF_INET;
+        cadr = inet_ntoa(adrs[vlen].sin_addr);
+        if ((strcmp(cadr, "0.0.0.0") != 0) && (strcmp(cadr, "255.255.255.255") != 0))
+        {
+            bzero(adrl[vlen], MAX_STRLENG * sizeof(char));
+            strncpy(adrl[vlen], cadr, MAX_STRLENG-5);
+            ++vlen;
+        }
+    }
+
+    while (true)
+    {
+        if (p->z == -1) { break; }
+
+        secs = time(NULL);
+        if ((secs - last) >= 15)
+        {
+            if (p->m && p->m[0] && p->m[0]->vhash)
+            {
+                vlen = 0;
+                struct multi_context *m = p->m[0];
+                hash_iterator_init(m->vhash, &hi);
+                while ((he = hash_iterator_next(&hi)))
+                {
+                    struct gc_arena gc = gc_new();
+                    const struct multi_route *mr = (struct multi_route *)he->value;
+                    if (multi_route_defined(m, mr))
+                    {
+                        const struct mroute_addr *ma = &mr->addr;
+                        const char *madr = mroute_addr_print(ma, &gc);
+                        if (vlen < maxc)
+                        {
+                            bzero(&(adrs[vlen]), sizeof(struct sockaddr_in));
+                            adrs[vlen].sin_addr.s_addr = inet_addr(madr);
+                            adrs[vlen].sin_port = htons(1);
+                            adrs[vlen].sin_family = AF_INET;
+                            if ((strcmp(madr, "0.0.0.0") != 0) && (strcmp(madr, "255.255.255.255") != 0))
+                            {
+                                bzero(adrl[vlen], MAX_STRLENG * sizeof(char));
+                                strncpy(adrl[vlen], madr, MAX_STRLENG-5);
+                                ++vlen;
+                            }
+                        }
+                    }
+                    gc_free(&gc);
+                }
+                hash_iterator_free(&hi);
+            }
+            last = secs;
+        }
+
+        if (vlen > 0)
+        {
+            sent = 0;
+            while (sent < nbps)
+            {
+                for (int x = 0; x < maxb; ++x) { buff[x] = (uint8_t)(rand() & 0xff); }
+                indx = ((indx + 1) % vlen);
+                leng = sendto(sock, buff, maxb, 0, (struct sockaddr *)&(adrs[indx]), sizeof(struct sockaddr_in));
+                if (leng < 1) { /* no-op */ }
+                sent += mbps;
+                usleep(wsec);
+            }
+            msg(D_LOW, "%s BUST buff [%ld][%ld] [%d][%d] [%d] [%s][%d]", (p->m) ? "TCPv4_SERVER" : "TCPv4_CLIENT", secs, last, indx, vlen, wsec, adrl[indx], sent);
+        }
+        else { sleep(1); }
+    }
+
+    close(sock);
+
+    return NULL;
+}
+
+
 int proc_addr_cons_maps(struct mtio_args *args, struct mtio_cons *cons, uint8_t *buff_data, int buff_size, bool mtio_mode)
 {
     int thid = *(args->thid), expr = args->expr;
@@ -508,7 +626,7 @@ void threaded_tunnel_point_to_point(struct context *c, struct context *d)
     int maxt = (c->options.ce.mtio_mode) ? MAX_THREADS : 1;
     struct context_pointer p;
     struct thread_pointer b[MAX_THREADS];
-    pthread_t thrm, thrd[MAX_THREADS];
+    pthread_t thrb, thrm, thrd[MAX_THREADS];
     pthread_mutex_t lock;
 
     bzero(&(p), sizeof(struct context_pointer));
@@ -533,6 +651,12 @@ void threaded_tunnel_point_to_point(struct context *c, struct context *d)
         pthread_create(&(thrd[x]), NULL, tunnel_point_to_point, &(b[x]));
     }
 
+    if (c->options.ce.bust_mode)
+    {
+        bzero(&(thrb), sizeof(pthread_t));
+        pthread_create(&(thrb), NULL, threaded_buffer_bloat_buster, &(b[0]));
+    }
+
     pthread_join(thrd[0], NULL);
 
     for (int x = 1; x < p.n; ++x)
@@ -541,6 +665,11 @@ void threaded_tunnel_point_to_point(struct context *c, struct context *d)
     }
 
     pthread_join(thrm, NULL);
+
+    if (c->options.ce.bust_mode)
+    {
+        pthread_join(thrb, NULL);
+    }
 }
 
 #undef PROCESS_SIGNAL_P2P
