@@ -68,7 +68,7 @@ int proc_addr_cons_maps(struct context *d, struct mtio_args *args, struct mtio_c
         }
         if (flag == 1)
         {
-            int indx = -1, scan = 0, logs = -1;
+            int indx = -1, scan = 0, memr = 4, expr = 5, logs = -1;
             time_t secs = time(NULL);
             uint32_t srcn = srca.v4.addr, dstn = dsta.v4.addr;
             uint32_t srch = (HASH_PART(srcn, 24, 11, 103) + HASH_PART(srcn, 16, 13, 107) + HASH_PART(srcn, 8, 17, 109) + HASH_PART(srcn, 0, 19, 113));
@@ -78,13 +78,15 @@ int proc_addr_cons_maps(struct context *d, struct mtio_args *args, struct mtio_c
             {
                 if (TEST_ADRS_CONN_MAPS(srca, dsta, cons[hidx]))
                 {
-                    indx = hidx; break;
+                    indx = hidx;
+                    if ((secs - cons[hidx].last) >= expr) { indx = (-1 * (hidx + 11)); }
+                    break;
                 }
-                else if ((cons[hidx].last <= 0) || ((secs - cons[hidx].last) >= 5))
+                else if ((secs - cons[hidx].last) >= expr)
                 {
                     if (indx == -1) { indx = (-1 * (hidx + 11)); }
                 }
-                if ((scan >= 4) && (indx != -1)) { break; }
+                if ((scan >= memr) && (indx != -1)) { break; }
                 hidx = ((hidx + 1) % MAX_CSTATES);
                 scan += 1;
             }
@@ -229,10 +231,12 @@ void *threaded_io_management(void *args)
     struct context_pointer *p = a->p;
     struct context *c, *d;
     int maxt = p->n, maxf = 0, maxl = 0;
-    int fdno = 0, indx = 0, size = 0, thid = 0, tidx = 0;
+    int maxz = TUN_BAT_MIN, maxx = (MAX_THREADS * TUN_BAT_MIN);
+    int fdno = 0, indx = 0, size = 0;
+    int thid = 0, tidx = 0, tlen = 0;
     ssize_t leng = 0;
     uint8_t *ptra, *ptrb;
-    uint8_t buff[MAX_THREADS*4], flag[MAX_THREADS*4];
+    uint8_t busy[maxx], flag[maxx];
     fd_set rfds;
     struct timeval timo;
     struct mtio_args marg;
@@ -245,21 +249,27 @@ void *threaded_io_management(void *args)
         size = d->c2.frame.buf.payload_size;
         sleep(1);
     }
+    if (size < 1) { size = 1; }
 
     in_addr_t nots[] = { inet_addr("0.0.0.0"), inet_addr("255.255.255.255") };
     in_addr_t msks[] = { inet_addr("10.0.0.0") };
-    int hold[2], bsiz[TUN_BAT_MAX], btid[TUN_BAT_MAX], btry[TUN_BAT_MAX];
-    uint8_t bufs[TUN_BAT_MAX][size];
-    uint8_t *bufp[TUN_BAT_MAX];
-    for (int x = 0; x < TUN_BAT_MAX; ++x) { bufp[x] = bufs[x]; bsiz[x] = 0; btid[x] = 0; btry[x] = 0; }
+    int sizs[maxx], idxs[maxx];
+    uint8_t bufl[maxx][size];
+    uint8_t *bufs[maxx];
+
+    for (int x = 0; x < maxx; ++x)
+    {
+        sizs[x] = 0; idxs[x] = 0;
+        bufs[x] = bufl[x];
+    }
 
     msg(M_INFO, "%s MTIO mgmt [%d]", (p->m) ? "TCPv4_SERVER" : "TCPv4_CLIENT", size);
 
-    marg.thid = &(thid); marg.buff = buff;
+    marg.thid = &(thid); marg.busy = busy;
     marg.nots = nots; marg.notl = (sizeof(nots) / sizeof(nots[0]));
     marg.msks = msks; marg.mskl = (sizeof(msks) / sizeof(msks[0]));
 
-    bzero(buff, maxt * sizeof(uint8_t));
+    bzero(busy, maxt * sizeof(uint8_t));
     bzero(cons, MAX_CSTATES * sizeof(struct mtio_cons));
     while (true)
     {
@@ -271,35 +281,29 @@ void *threaded_io_management(void *args)
             FD_ZERO(&rfds);
             for (int x = 0; x < maxt; ++x)
             {
-                if (buff[x] != 1) { indx = x; }
+                if (busy[x] != 1) { indx = x; }
                 FD_SET(p->r[x][0], &rfds);
                 if (p->r[x][0] > maxf) { maxf = p->r[x][0]; }
                 flag[x] = 0;
             }
-            hold[0] = 0; hold[1] = 0;
-            for (int x = 0; x < TUN_BAT_MIN; ++x)
-            {
-                if ((bsiz[x] > 0) && (buff[btid[x]] == 1)) { hold[1] += 1; btry[x] += 1; }
-            }
-            if (hold[1] == TUN_BAT_MIN) { indx = -1; }
             timo.tv_sec = 0; timo.tv_usec = 0;
             select(maxf+1, &rfds, NULL, NULL, (indx < 0) ? NULL : &timo);
             for (int x = 0; x < maxt; ++x)
             {
                 if (FD_ISSET(p->r[x][0], &rfds))
                 {
-                    leng = read(p->r[x][0], &(buff[maxt+1]), 1);
-                    buff[x] = 0;
+                    leng = read(p->r[x][0], &(busy[maxt+1]), 1);
+                    busy[x] = 0;
                 }
-                if (buff[x] != 1)
+                if (busy[x] != 1)
                 {
-                    if (buff[thid] == 1) { thid = x; }
+                    if (busy[thid] == 1) { thid = x; }
                 }
             }
-            for (int x = 0; x < TUN_BAT_MIN; ++x)
+            tlen = 0;
+            for (int x = 0; x < maxx; ++x)
             {
-                if (btry[x] >= 96) { btid[x] = thid; }
-                if ((bsiz[x] > 0) && (buff[btid[x]] != 1)) { hold[0] += 1; }
+                if (sizs[x] > 0) { tlen = (x + 1); }
             }
             c = (p->m) ? &(p->m[thid]->top) : a[thid].c;
             d = (p->m) ? &(p->m[0]->top) : a[0].c;
@@ -308,44 +312,46 @@ void *threaded_io_management(void *args)
                 fdno = d->c1.tuntap->ff;
                 FD_ZERO(&rfds); FD_SET(fdno, &rfds);
                 timo.tv_sec = 1; timo.tv_usec = 750000;
-                if ((hold[0] > 0) || (hold[1] > 0)) { timo.tv_sec = 0; timo.tv_usec = 0; }
+                if (tlen > 0) { timo.tv_sec = 0; timo.tv_usec = 0; }
                 if (BULK_MODE(c))
                 {
-                    for (int x = 0; x < TUN_BAT_MIN; ++x)
+                    for (int x = 0; x < maxx; ++x)
                     {
-                        if (bsiz[x] < 1)
+                        if (sizs[x] < 1)
                         {
+                            tlen = min_max(tlen, 0, maxx);
                             select(fdno+1, &rfds, NULL, NULL, &timo);
-                            if ((p->z == 1) && FD_ISSET(fdno, &rfds))
+                            if ((p->z == 1) && FD_ISSET(fdno, &rfds) && (tlen < maxx))
                             {
-                                leng = read(fdno, bufp[x], size);
+                                leng = read(fdno, bufs[tlen], size);
                                 maxl = (int)leng;
                                 d->c2.buffers->read_tun_bufs[TUN_BAT_MAX-1].len = maxl;
                                 d->c2.buffers->read_tun_bufs[TUN_BAT_MAX-1].offset = TUN_BAT_OFF;
                                 ptra = BPTR(&d->c2.buffers->read_tun_bufs[TUN_BAT_MAX-1]);
-                                bcopy(bufp[x], ptra, leng);
+                                bcopy(bufs[tlen], ptra, leng);
                                 tidx = proc_addr_cons_maps(d, &(marg), cons);
-                                bsiz[x] = maxl; btid[x] = tidx; btry[x] = 0;
+                                sizs[tlen] = maxl; idxs[tlen] = tidx;
+                                tlen = (x + 1);
                             }
                             FD_ZERO(&rfds); FD_SET(fdno, &rfds);
                             timo.tv_sec = 0; timo.tv_usec = 0;
                         }
-                        if (bsiz[x] > 0)
+                        if (sizs[x] > 0)
                         {
-                            tidx = btid[x];
-                            if ((p->z == 1) && (buff[tidx] != 1))
+                            tidx = idxs[x];
+                            c = (p->m) ? &(p->m[tidx]->top) : a[tidx].c;
+                            indx = min_max(c->c2.buffers->bulk_leng, 0, maxz);
+                            if ((p->z == 1) && (busy[tidx] != 1) && (indx < maxz))
                             {
-                                c = (p->m) ? &(p->m[tidx]->top) : a[tidx].c;
-                                indx = min_max(c->c2.buffers->bulk_leng, 0, TUN_BAT_MIN - 1);
-                                c->c2.buffers->read_tun_bufs[indx].len = bsiz[x];
+                                c->c2.buffers->read_tun_bufs[indx].len = sizs[x];
                                 c->c2.buffers->read_tun_bufs[indx].offset = TUN_BAT_OFF;
                                 ptrb = BPTR(&c->c2.buffers->read_tun_bufs[indx]);
-                                bcopy(bufp[x], ptrb, bsiz[x]);
+                                bcopy(bufs[x], ptrb, sizs[x]);
                                 c->c2.bufs[indx] = c->c2.buffers->read_tun_bufs[indx];
                                 c->c2.buf = c->c2.bufs[0];
                                 c->c2.buffers->bulk_indx = 0;
                                 c->c2.buffers->bulk_leng = (indx + 1);
-                                bsiz[x] = 0; btid[x] = 0; btry[x] = 0;
+                                sizs[x] = 0;
                                 flag[tidx] = 1;
                             }
                         }
@@ -362,12 +368,12 @@ void *threaded_io_management(void *args)
                         flag[thid] = 1;
                     }
                 }
-                for (int y = 0; y < maxt; ++y)
+                for (int x = 0; x < maxt; ++x)
                 {
-                    if (flag[y] == 1)
+                    if (flag[x] == 1)
                     {
-                        leng = write(p->s[y][1], buff, 1);
-                        buff[y] = 1;
+                        leng = write(p->s[x][1], busy, 1);
+                        busy[x] = 1;
                     }
                 }
             }

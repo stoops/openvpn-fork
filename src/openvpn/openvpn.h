@@ -586,21 +586,21 @@ struct multi_info
     struct multi_address *addr;
 };
 
+struct mtio_args
+{
+    int *thid;
+    uint8_t *busy;
+    int notl;
+    in_addr_t *nots;
+    int mskl;
+    in_addr_t *msks;
+};
+
 struct mtio_cons
 {
     int thid;
     time_t last;
     in_addr_t srca, dsta;
-};
-
-struct mtio_args
-{
-    int *thid;
-    uint8_t *buff;
-    int notl;
-    in_addr_t *nots;
-    int mskl;
-    in_addr_t *msks;
 };
 
 void *threaded_io_management(void *args);
