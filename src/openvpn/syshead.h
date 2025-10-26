@@ -474,10 +474,6 @@ socket_defined(const socket_descriptor_t sd)
 #define PORT_SHARE 0
 #endif
 
-#ifdef ENABLE_CRYPTO_MBEDTLS
-#define ENABLE_PREDICTION_RESISTANCE
-#endif /* ENABLE_CRYPTO_MBEDTLS */
-
 /*
  * Do we support Unix domain sockets?
  */
