@@ -401,11 +401,15 @@ multi_init(struct context *t)
     m->instances = calloc(m->max_clients, sizeof(struct multi_instance *));
 
     m->top.c2.event_set = t->c2.event_set;
+    m->top.c2.event_set2 = t->c2.event_set2;
 
     /*
      * Initialize multi-socket I/O wait object
      */
-    m->multi_io = multi_io_init(m->max_clients);
+    for (int x = 0; x < MAX_THREADS; ++x)
+    {
+        m->multi_io[x] = multi_io_init(m->max_clients);
+    }
     m->tcp_queue_limit = t->options.tcp_queue_limit;
 
     /*
@@ -856,7 +860,7 @@ multi_create_instance(struct thread_pointer *b, const struct mroute_addr *real, 
     mi->inotify_watch = -1;
 #endif
 
-    if (!multi_process_post(m, mi, MPP_PRE_SELECT))
+    if (!multi_process_post(m, mi, MPP_PRE_SELECT | MPP_THREADZ))
     {
         msg(D_MULTI_ERRORS, "MULTI: signal occurred during client instance initialization");
         goto err;
@@ -1825,22 +1829,22 @@ multi_client_connect_setenv(struct multi_instance *mi)
 static bool
 multi_client_set_protocol_options(struct context *c)
 {
-    struct tls_multi *tls_multi = c->c2.tls_multi;
-    const char *const peer_info = tls_multi->peer_info;
+    struct tls_multi *multi = c->c2.tls_multi;
+    const char *const peer_info = multi->peer_info;
     struct options *o = &c->options;
 
 
     unsigned int proto = extract_iv_proto(peer_info);
     if (proto & IV_PROTO_DATA_V2)
     {
-        tls_multi->use_peer_id = true;
+        multi->use_peer_id = true;
         o->use_peer_id = true;
     }
     else if (dco_enabled(o))
     {
         msg(M_INFO, "Client does not support DATA_V2. Data channel offloading "
                     "requires DATA_V2. Dropping client.");
-        auth_set_client_reason(tls_multi, "Data channel negotiation "
+        auth_set_client_reason(multi, "Data channel negotiation "
                                           "failed (missing DATA_V2)");
         return false;
     }
@@ -1867,7 +1871,7 @@ multi_client_set_protocol_options(struct context *c)
     {
         msg(M_INFO, "PUSH: client does not support TLS Keying Material "
                     "Exporters but --force-tls-key-material-export is enabled.");
-        auth_set_client_reason(tls_multi, "Client incompatible with this "
+        auth_set_client_reason(multi, "Client incompatible with this "
                                           "server. Keying Material Exporters (RFC 5705) "
                                           "support missing. Upgrade to a client that "
                                           "supports this feature (OpenVPN 2.6.0+).");
@@ -1889,7 +1893,8 @@ multi_client_set_protocol_options(struct context *c)
      * cipher -> so log the fact and push the "what we have now" cipher
      * (so the client is always told what we expect it to use)
      */
-    if (get_primary_key(tls_multi)->crypto_options.key_ctx_bi.initialized)
+    struct key_state *ks = tls_select_encryption_key_init(multi);
+    if (ks && ks->crypto_options.key_ctx_bi.initialized)
     {
         msg(M_INFO,
             "PUSH: client wants to negotiate cipher (NCP), but "
@@ -1903,13 +1908,11 @@ multi_client_set_protocol_options(struct context *c)
      * Push the first cipher from --data-ciphers to the client that
      * the client announces to be supporting.
      */
-    char *push_cipher =
-        ncp_get_best_cipher(o->ncp_ciphers, peer_info, tls_multi->remote_ciphername, &o->gc);
+    char *push_cipher = ncp_get_best_cipher(o->ncp_ciphers, peer_info, multi->remote_ciphername, &o->gc);
     if (push_cipher)
     {
         /* Enable epoch data key format if supported and AEAD cipher in use */
-        if (tls_multi->session[TM_ACTIVE].opt->data_epoch_supported && (proto & IV_PROTO_DATA_EPOCH)
-            && cipher_kt_mode_aead(push_cipher))
+        if (multi->opt.data_epoch_supported && (proto & IV_PROTO_DATA_EPOCH) && cipher_kt_mode_aead(push_cipher))
         {
             o->imported_protocol_flags |= CO_EPOCH_DATA_KEY_FORMAT;
         }
@@ -1935,18 +1938,18 @@ multi_client_set_protocol_options(struct context *c)
             "Server data-ciphers: '%s'%s, client supported ciphers '%s'",
             o->ncp_ciphers_conf, ncp_expanded_ciphers(o, &gc), peer_ciphers);
     }
-    else if (tls_multi->remote_ciphername)
+    else if (multi->remote_ciphername)
     {
         msg(M_INFO,
             "PUSH: No common cipher between server and client. "
             "Server data-ciphers: '%s'%s, client supports cipher '%s'",
-            o->ncp_ciphers_conf, ncp_expanded_ciphers(o, &gc), tls_multi->remote_ciphername);
+            o->ncp_ciphers_conf, ncp_expanded_ciphers(o, &gc), multi->remote_ciphername);
     }
     else
     {
         msg(M_INFO, "PUSH: No NCP or OCC cipher data received from peer.");
 
-        if (o->enable_ncp_fallback && !tls_multi->remote_ciphername)
+        if (o->enable_ncp_fallback && !multi->remote_ciphername)
         {
             msg(M_INFO,
                 "Using data channel cipher '%s' since "
@@ -1962,7 +1965,7 @@ multi_client_set_protocol_options(struct context *c)
     }
     if (!ret)
     {
-        auth_set_client_reason(tls_multi, "Data channel cipher negotiation "
+        auth_set_client_reason(multi, "Data channel cipher negotiation "
                                           "failed (no shared cipher)");
     }
 
@@ -2388,31 +2391,6 @@ multi_client_setup_dco_initial(struct multi_context *m, struct multi_instance *m
     return true;
 }
 
-/**
- * Generates the data channel keys
- */
-static bool
-multi_client_generate_tls_keys(struct context *c)
-{
-    struct frame *frame_fragment = NULL;
-#ifdef ENABLE_FRAGMENT
-    if (c->options.ce.fragment)
-    {
-        frame_fragment = &c->c2.frame_fragment;
-    }
-#endif
-    struct tls_session *session = &c->c2.tls_multi->session[TM_ACTIVE];
-    if (!tls_session_update_crypto_params(c->c2.tls_multi, session, &c->options, &c->c2.frame,
-                                          frame_fragment, get_link_socket_info(c),
-                                          &c->c1.tuntap->dco))
-    {
-        msg(D_TLS_ERRORS, "TLS Error: initializing data channel failed");
-        register_signal(c->sig, SIGUSR1, "process-push-msg-failed");
-        return false;
-    }
-
-    return true;
-}
 
 bool multi_context_switch_addr(struct multi_context *m, struct multi_instance *i)
 {
@@ -2585,7 +2563,7 @@ multi_client_connect_late_setup(struct multi_context *m, struct multi_instance *
     }
     /* Generate data channel keys only if setting protocol options
      * and DCO initial setup has not failed */
-    else if (!multi_client_generate_tls_keys(&mi->context))
+    else if (!do_deferred_options_part2(&mi->context))
     {
         mi->context.c2.tls_multi->multi_state = CAS_FAILED;
     }
@@ -2784,7 +2762,6 @@ override_locked_username(struct multi_instance *mi)
 {
     struct tls_multi *multi = mi->context.c2.tls_multi;
     struct options *options = &mi->context.options;
-    struct tls_session *session = &multi->session[TM_ACTIVE];
 
     if (!multi->locked_username)
     {
@@ -2799,7 +2776,7 @@ override_locked_username(struct multi_instance *mi)
         && strcmp(multi->locked_username, options->override_username) != 0)
     {
         /* Check if the username length is acceptable */
-        if (!ssl_verify_username_length(session, options->override_username))
+        if (!ssl_verify_username_length(multi, options->override_username))
         {
             return false;
         }
@@ -2809,9 +2786,9 @@ override_locked_username(struct multi_instance *mi)
 
         /* Override also the common name if username should be set as common
          * name */
-        if ((session->opt->ssl_flags & SSLF_USERNAME_AS_COMMON_NAME))
+        if ((multi->opt.ssl_flags & SSLF_USERNAME_AS_COMMON_NAME))
         {
-            set_common_name(session, multi->locked_username);
+            set_common_name(multi, multi->locked_username);
             free(multi->locked_cn);
             multi->locked_cn = NULL;
             tls_lock_common_name(multi);
@@ -3195,16 +3172,17 @@ multi_process_post(struct multi_context *m, struct multi_instance *mi, const uns
 {
     bool ret = true;
 
-    if (!IS_SIG(&mi->context)
+    if (!IS_SIG(&mi->context) && ((flags & MPP_THREADZ) != 0)
         && ((flags & MPP_PRE_SELECT)
             || ((flags & MPP_CONDITIONAL_PRE_SELECT) && !ANY_OUT(&mi->context))))
     {
 #if defined(ENABLE_ASYNC_PUSH)
         bool was_unauthenticated = true;
         struct key_state *ks = NULL;
-        if (mi->context.c2.tls_multi)
+        struct tls_multi *multi = mi->context.c2.tls_multi;
+        if (multi)
         {
-            ks = &mi->context.c2.tls_multi->session[TM_ACTIVE].key[KS_PRIMARY];
+            ks = tls_select_encryption_key(multi);
             was_unauthenticated = (ks->authenticated == KS_AUTH_FALSE);
         }
 #endif
@@ -3255,7 +3233,7 @@ multi_process_post(struct multi_context *m, struct multi_instance *mi, const uns
 
     if (IS_SIG(&mi->context))
     {
-        if (flags & MPP_CLOSE_ON_SIGNAL)
+        if ((flags & MPP_CLOSE_ON_SIGNAL) && ((flags & MPP_THREADZ) != 0))
         {
             multi_close_instance_on_signal(m, mi);
             ret = false;
@@ -3264,8 +3242,8 @@ multi_process_post(struct multi_context *m, struct multi_instance *mi, const uns
     else
     {
         /* continue to pend on output? */
-        multi_set_pending(m, LINK_OUT(&mi->context) ? mi : NULL);
-        multi_set_pending2(m, TUN_OUT(&mi->context) ? mi : NULL);
+        if ((flags & MPP_THREADZ) != 0) { multi_set_pending(m, LINK_OUT(&mi->context) ? mi : NULL); }
+        if ((flags & MPP_THREADZ) == 0) { multi_set_pending2(m, TUN_OUT(&mi->context) ? mi : NULL); }
 
 #ifdef MULTI_DEBUG_EVENT_LOOP
         printf("POST %s[%d][%d] to=%d lo=%d/%d w=%" PRIi64 "/%ld\n", id(mi), (int)(mi == m->pending), (int)(mi == m->pending2),
@@ -4328,9 +4306,12 @@ static void
 management_delete_event(void *arg, event_t event)
 {
     struct multi_context *m = (struct multi_context *)arg;
-    if (m->multi_io)
+    if (m->multi_io->es)
     {
-        multi_tcp_delete_event(m->multi_io, event);
+        for (int x = 0; x < MAX_THREADS; ++x)
+        {
+            multi_tcp_delete_event(&(m->multi_io[x]), event);
+        }
     }
 }
 
@@ -4385,13 +4366,18 @@ management_client_pending_auth(void *arg, const unsigned long cid, const unsigne
         {
             session = &multi->session[TM_ACTIVE];
         }
+        else if (multi->session[TM_LAME].key[KS_PRIMARY].mda_key_id == mda_key_id)
+        {
+            session = &multi->session[TM_LAME];
+        }
         else
         {
             return false;
         }
 
         /* sends INFO_PRE and AUTH_PENDING messages to client */
-        bool ret = send_auth_pending_messages(multi, session, extra, timeout);
+        struct key_state *ks = tls_select_encryption_key_init(multi);
+        bool ret = send_auth_pending_messages(multi, session, ks, extra, timeout);
         reschedule_multi_process(&mi->context);
         multi_schedule_context_wakeup(m, mi);
         return ret;
@@ -4526,6 +4512,20 @@ multi_get_timeout(struct multi_context *multi, struct timeval *timeval)
 #endif /* ENABLE_MANAGEMENT */
 }
 
+void multi_copy_events(struct multi_context *m)
+{
+    struct multi_io *multi_io = &(m->multi_io[THREAD_MAIN]);
+    for (int i = 0; i < multi_io->n_esr; ++i)
+    {
+        for (int j = THREAD_RTWL; j <= THREAD_RLWT; ++j)
+        {
+            struct multi_io *multi_io_z = &(m->multi_io[j]);
+            multi_io_z->esr[i] = multi_io->esr[i];
+            multi_io_z->n_esr = multi_io->n_esr;
+        }
+    }
+}
+
 /**************************************************************************/
 /**
  * Main event loop for OpenVPN in point-to-multipoint server mode.
@@ -4582,6 +4582,26 @@ static void tunnel_server_loop(struct thread_pointer *b)
         }
     }
 
+    bool dual_mode = d->options.ce.dual_mode;
+    const unsigned int f = MPP_THREADZ;
+    struct dual_args link, intf;
+    pthread_t thrl, thri;
+
+    if (dual_mode)
+    {
+        pthread_mutex_init(&(intf.i), NULL); pthread_mutex_init(&(intf.o), NULL);
+        pthread_mutex_lock(&(intf.i)); pthread_mutex_lock(&(intf.o));
+        intf.c = c; intf.b = b; intf.z = THREAD_RTWL; intf.a = 0;
+        bzero(&(thri), sizeof(pthread_t));
+        pthread_create(&(thri), NULL, threaded_multi_io_process_io, &(intf));
+
+        pthread_mutex_init(&(link.i), NULL); pthread_mutex_init(&(link.o), NULL);
+        pthread_mutex_lock(&(link.i)); pthread_mutex_lock(&(link.o));
+        link.c = c; link.b = b; link.z = THREAD_RLWT; link.a = 0;
+        bzero(&(thrl), sizeof(pthread_t));
+        pthread_create(&(thrl), NULL, threaded_multi_io_process_io, &(link));
+    }
+
     msg(M_INFO, "TCPv4_SERVER MTIO init [%d][%d] [%d][%d] {%d}{%d}", b->h, b->n, p->h, p->n, p->z, b->i);
 
     while (true)
@@ -4611,11 +4631,24 @@ static void tunnel_server_loop(struct thread_pointer *b)
         if (status > 0)
         {
             /* process the I/O which triggered select */
-            multi_io_process_io(b);
+            if (dual_mode)
+            {
+                multi_copy_events(multi);
+                pthread_mutex_unlock(&(link.i)); pthread_mutex_unlock(&(intf.i));
+                pthread_mutex_lock(&(link.o)); pthread_mutex_lock(&(intf.o));
+            }
+            else
+            {
+                multi_io_process_io(b, f, THREAD_MAIN);
+            }
+            for (int x = 0; x < MAX_THREADS; ++x)
+            {
+                multi->multi_io[x].n_esr = 0;
+            }
         }
         else if (status == 0)
         {
-            multi_io_action(multi, NULL, TA_TIMEOUT, false);
+            multi_io_action(multi, NULL, TA_TIMEOUT, false, f, THREAD_MAIN);
         }
 
         MULTI_CHECK_SIG(multi);
@@ -4633,6 +4666,12 @@ static void tunnel_server_loop(struct thread_pointer *b)
         close(p->r[b->i-1][1]);
         c->c1.tuntap->fd = c->c1.tuntap->ff;
         c->c1.tuntap->ff = -1;
+    }
+
+    if (dual_mode)
+    {
+        pthread_mutex_unlock(&(link.i)); pthread_mutex_unlock(&(intf.i));
+        pthread_join(thrl, NULL); pthread_join(thri, NULL);
     }
 }
 

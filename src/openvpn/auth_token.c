@@ -217,8 +217,8 @@ generate_auth_token(const struct user_pass *up, struct tls_multi *multi)
      * a new token with the empty username since we do not want to loose
      * the information that the username cannot be trusted
      */
-    struct key_state *ks = &multi->session[TM_ACTIVE].key[KS_PRIMARY];
-    if (ks->auth_token_state_flags & AUTH_TOKEN_VALID_EMPTYUSER)
+    struct key_state *ks = tls_select_encryption_key_init(multi);
+    if (ks && ks->auth_token_state_flags & AUTH_TOKEN_VALID_EMPTYUSER)
     {
         hmac_ctx_update(ctx, (const uint8_t *)"", 0);
     }
@@ -415,10 +415,15 @@ void
 check_send_auth_token(struct context *c)
 {
     struct tls_multi *multi = c->c2.tls_multi;
-    struct tls_session *session = &multi->session[TM_ACTIVE];
 
-    if (get_primary_key(multi)->state < S_GENERATED_KEYS
-        || get_primary_key(multi)->authenticated != KS_AUTH_TRUE)
+    if (!multi)
+    {
+        return;
+    }
+
+    struct key_state *ks = tls_select_encryption_key_init(multi);
+
+    if (ks->state < S_GENERATED_KEYS || ks->authenticated != KS_AUTH_TRUE)
     {
         /* the currently active session is still in renegotiation or another
          * not fully authorized state. We are either very close to a
@@ -447,11 +452,11 @@ check_send_auth_token(struct context *c)
 
     generate_auth_token(&up, multi);
 
-    resend_auth_token_renegotiation(multi, session);
+    resend_auth_token_renegotiation(multi);
 }
 
 void
-resend_auth_token_renegotiation(struct tls_multi *multi, struct tls_session *session)
+resend_auth_token_renegotiation(struct tls_multi *multi)
 {
     /*
      * Auth token already sent to client, update auth-token on client.

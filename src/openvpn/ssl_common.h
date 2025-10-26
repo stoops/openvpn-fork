@@ -75,6 +75,7 @@
  * @{
  */
 /* clang-format off */
+
 #define S_ERROR         (-2)    /**< Error state.  */
 #define S_ERROR_PRE     (-1)    /**< Error state but try to send out alerts
                                  *  before killing the keystore and moving
@@ -105,6 +106,7 @@
 #define S_GENERATED_KEYS  8     /**< The data channel keys have been generated
                                  *  The TLS session is fully authenticated
                                  *  when reaching this state. */
+
 /* clang-format on */
 /* Note that earlier versions also had a S_OP_NORMAL state that was
  * virtually identical with S_ACTIVE and the code still assumes everything
@@ -215,6 +217,12 @@ struct key_state
      * @see tls_session::key_id.
      */
     int key_id;
+    int keys_idno;
+    int keys_sels;
+    bool keys_lame;
+    bool keys_reno;
+    bool keys_gens;
+    time_t keys_wait;
 
     /**
      * Key id for this key_state, inherited from struct tls_session.
@@ -222,13 +230,14 @@ struct key_state
      */
     uint32_t peer_id;
 
-    struct key_state_ssl ks_ssl;           /* contains SSL object and BIOs for the control channel */
+    struct key_state_ssl *ks_ssl;           /* contains SSL object and BIOs for the control channel */
 
     time_t initial;                        /* when we created this session */
     time_t established;                    /* when our state went S_ACTIVE */
     time_t must_negotiate;                 /* key negotiation times out if not finished before this time */
     time_t must_die;                       /* this object is destroyed at this time */
-    time_t peer_last_packet;               /* Last time we received a packet in this control session */
+    time_t *peer_last_packet;               /* Last time we received a packet in this control session */
+    int peer_push_trys;
 
     int initial_opcode;                    /* our initial P_ opcode */
     struct session_id session_id_remote;   /* peer's random session ID */
@@ -240,6 +249,7 @@ struct key_state
 
     struct buffer plaintext_read_buf;
     struct buffer plaintext_write_buf;
+    struct buffer ack_read_buf;
     struct buffer ack_write_buf;
 
     struct reliable *send_reliable; /* holds a copy of outgoing packets until ACK received */
@@ -249,7 +259,7 @@ struct key_state
 
     /** Holds outgoing message for the control channel until ks->state reaches
      * S_ACTIVE */
-    struct buffer_list *paybuf;
+    struct buffer_list **paybuf;
     counter_type n_bytes;   /* how many bytes sent/recvd since last key exchange */
     counter_type n_packets; /* how many packets sent/recvd since last key exchange */
 
@@ -453,6 +463,8 @@ struct tls_options
     size_t ekm_size;
 
     bool dco_enabled; /**< Whether keys have to be installed in DCO or not */
+
+    bool dual_mode;
 };
 
 /** @addtogroup control_processor
@@ -546,9 +558,13 @@ struct tls_session
 #define TM_INITIAL                                           \
     1                  /**< As yet un-trusted \c tls_session \
                         *   being negotiated. */
-#define TM_LAME_DUCK 2 /**< Old \c tls_session. */
+#define TM_LAME     2 /**< Old \c tls_session. */
+#define TM_THREADED 3
+#define TM_BACK     4
+#define TM_REKEYS   5
+#define TM_NOOP     6
 #define TM_SIZE                                              \
-    3                  /**< Size of the \c tls_multi.session \
+    7                  /**< Size of the \c tls_multi.session \
                         *   array. */
 /** @} name Index of tls_session objects within a tls_multi structure */
 /** @} addtogroup control_processor */
@@ -564,7 +580,7 @@ struct tls_session
  * channel key available even when network conditions are so bad that
  * we can't negotiate a new key within the time allotted.
  */
-#define KEY_SCAN_SIZE 3
+#define KEY_SCAN_SIZE 5
 
 
 /* multi state (originally client authentication state (=CAS))
@@ -722,9 +738,36 @@ struct tls_multi
      * p2p NCP and we need to track the id that is really used.
      */
     int dco_peer_id;
-
     dco_context_t *dco;
+
+    bool kssl_init;
+    bool verified;
+    char *common_name;
+    int verify_maxlevel;
+    struct cert_hash_set *cert_hash_set;
+    struct key_state_ssl ks_ssl;
+
+    bool acks_init;
+    time_t peer_last_packet;
+    struct buffer_list *paybuf;
+    struct reliable *send_reliable;
+    struct reliable *rec_reliable;
+    struct reliable_ack *rec_ack;
+    struct reliable_ack *lru_acks;
+
+    time_t keys_last;
+    int lame_mods[3];
+    bool keys_init;
+    bool keys_reno;
+    bool keys_send;
+    bool keys_read;
+
+    struct link_socket_actual untrusted_addr;
 };
+
+#define KEYS_MASK 0x7
+
+bool tls_session_generate_data_keys_helper(struct tls_multi *multi, struct tls_session *session, struct key_state *ks);
 
 /**  gets an item  of \c key_state objects in the
  *   order they should be scanned by data
@@ -738,10 +781,24 @@ get_key_scan(struct tls_multi *multi, int index)
             return &multi->session[TM_ACTIVE].key[KS_PRIMARY];
 
         case 1:
-            return &multi->session[TM_ACTIVE].key[KS_LAME_DUCK];
+            return &multi->session[TM_LAME].key[KS_PRIMARY];
 
         case 2:
-            return &multi->session[TM_LAME_DUCK].key[KS_LAME_DUCK];
+            if (multi->session[TM_REKEYS].key[KS_PRIMARY].state >= S_GENERATED_KEYS)
+            {
+                return &multi->session[TM_REKEYS].key[KS_PRIMARY];
+            }
+            if (multi->session[TM_NOOP].key[KS_PRIMARY].state >= S_GENERATED_KEYS)
+            {
+                return &multi->session[TM_NOOP].key[KS_PRIMARY];
+            }
+            return &multi->session[TM_REKEYS].key[KS_PRIMARY];
+
+        case 3:
+            return &multi->session[TM_THREADED].key[KS_PRIMARY];
+
+        case 4:
+            return &multi->session[TM_BACK].key[KS_PRIMARY];
 
         default:
             ASSERT(false);
@@ -749,13 +806,67 @@ get_key_scan(struct tls_multi *multi, int index)
     }
 }
 
-/**  gets an item  of \c key_state objects in the
- *   order they should be scanned by data
- *   channel modules. */
-static inline const struct key_state *
-get_primary_key(const struct tls_multi *multi)
+static inline struct key_state *
+tls_select_encryption_key(struct tls_multi *multi)
 {
-    return &multi->session[TM_ACTIVE].key[KS_PRIMARY];
+    int indx = -1;
+    bool dual_mode = multi->opt.dual_mode;
+    time_t secs = time(NULL);
+    struct key_state *ks_select = NULL;
+    for (int i = 0; i < KEY_SCAN_SIZE; ++i)
+    {
+        struct key_state *ks = get_key_scan(multi, i);
+        if (ks->state >= S_GENERATED_KEYS && ks->authenticated == KS_AUTH_TRUE && ks->keys_gens && (secs - ks->keys_wait) >= 5)
+        {
+            ASSERT(ks->crypto_options.key_ctx_bi.initialized);
+
+            if (dual_mode && (i >= TM_THREADED))
+            {
+                if (multi->opt.mode == MODE_SERVER)
+                {
+                    indx = i;
+                    ks_select = ks;
+                    break;
+                }
+                continue;
+            }
+
+            if (!ks_select)
+            {
+                indx = i;
+                ks_select = ks;
+            }
+
+            if (now >= ks->auth_deferred_expire)
+            {
+                bool scan_more = (dual_mode && (i < TM_THREADED) && (multi->opt.mode == MODE_SERVER)) ? true : false;
+                indx = i;
+                ks_select = ks;
+                if (!scan_more) { break; }
+            }
+        }
+    }
+    if (dual_mode && ks_select && (ks_select->keys_sels != KEYS_MASK))
+    {
+        msg(M_INFO, "TCPv4_SERVER DUAL sels [%d][%d]", indx, ks_select->keys_idno);
+        ks_select->keys_sels = KEYS_MASK;
+    }
+    return ks_select;
+}
+
+static inline struct key_state *
+tls_select_encryption_key_init(struct tls_multi *multi)
+{
+    struct key_state *ks = tls_select_encryption_key(multi);
+    if (ks) { return ks; }
+    for (int i = 0; i < TM_SIZE; ++i)
+    {
+        struct tls_session *sn = &multi->session[i];
+        struct key_state *kx = &sn->key[KS_PRIMARY];
+        if (kx->state >= S_ACTIVE) { return kx; }
+    }
+    ks = &multi->session[TM_INITIAL].key[KS_PRIMARY];
+    return ks;
 }
 
 #endif /* SSL_COMMON_H_ */
