@@ -185,6 +185,9 @@ struct connection_entry
     bool mtio_conf;
     bool mtio_mode;
     int mtio_time;
+
+    /* Dual mode splits the core operations into two independent threads: link-read + tunn-send & tunn-read + link-send */
+    bool dual_mode;
 };
 
 struct remote_entry
