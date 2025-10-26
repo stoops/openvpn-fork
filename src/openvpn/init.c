@@ -2330,6 +2330,9 @@ do_deferred_options_part2(struct context *c)
         return false;
     }
 
+    session = &c->c2.tls_multi->session[TM_THREADZ];
+    tls_session_update_crypto_params(c->c2.tls_multi, session, &c->options, &c->c2.frame, frame_fragment, get_link_socket_info(c), &c->c1.tuntap->dco);
+
     return true;
 }
 
@@ -2579,6 +2582,10 @@ do_deferred_p2p_ncp(struct context *c)
         msg(D_TLS_ERRORS, "ERROR: failed to set crypto cipher");
         return false;
     }
+
+    session = &c->c2.tls_multi->session[TM_THREADZ];
+    tls_session_update_crypto_params(c->c2.tls_multi, session, &c->options, &c->c2.frame, frame_fragment, get_link_socket_info(c), &c->c1.tuntap->dco);
+
     return true;
 }
 
@@ -3437,6 +3444,8 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
 
     /* let the TLS engine know if keys have to be installed in DCO or not */
     to.dco_enabled = dco_enabled(options);
+
+    to.dual_mode = c->options.ce.dual_mode;
 
     /*
      * Initialize OpenVPN's master TLS-mode object.

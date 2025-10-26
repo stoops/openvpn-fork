@@ -81,7 +81,11 @@ void io_wait_dowork(struct context *c, const unsigned int flags);
 
 void pre_select(struct context *c);
 
-void process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b);
+void process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b, int z);
+
+void *threaded_process_io(void *a);
+
+void threaded_dual_init(struct dual_args *d);
 
 
 /**********************************************************************/

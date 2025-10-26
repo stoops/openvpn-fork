@@ -2507,7 +2507,7 @@ void threaded_fwd_inp_intf(struct context *c, struct link_socket *sock, struct t
 }
 
 void
-process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b)
+process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b, int z)
 {
     const unsigned int status = c->c2.event_set_status;
 
@@ -2520,17 +2520,17 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
 #endif
 
     /* TCP/UDP port ready to accept write */
-    if (status & SOCKET_WRITE)
+    if ((status & SOCKET_WRITE) && ((z & 2) != 0))
     {
         process_outgoing_link(c, sock);
     }
     /* TUN device ready to accept write */
-    else if (status & TUN_WRITE)
+    else if ((status & TUN_WRITE) && ((z & 1) != 0))
     {
         process_outgoing_tun(c, sock);
     }
     /* Incoming data on TCP/UDP port */
-    else if (status & SOCKET_READ)
+    else if ((status & SOCKET_READ) && ((z & 1) != 0))
     {
         read_incoming_link(c, sock);
         if (!IS_SIG(c))
@@ -2539,15 +2539,55 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
         }
     }
     /* Incoming data on TUN device */
-    else if (status & TUN_READ)
+    else if ((status & TUN_READ) && ((z & 2) != 0))
     {
         threaded_fwd_inp_intf(c, sock, b);
     }
-    else if (status & DCO_READ)
+    else if ((status & DCO_READ) && ((z & 1) != 0))
     {
         if (!IS_SIG(c))
         {
             process_incoming_dco(c);
         }
     }
+}
+
+void threaded_dual_init(struct dual_args *d)
+{
+    if (d->a == 0)
+    {
+        if (d->c->c2.buffers)
+        {
+            if ((d->z & 1) != 0)
+            {
+                d->c->c2.buffers->read_link_buf.len = 0;
+                d->c->c2.buf2 = d->c->c2.buffers->read_link_buf;
+                d->a = 1;
+            }
+            if ((d->z & 2) != 0)
+            {
+                d->c->c2.buffers->read_tun_buf.len = 0;
+                d->c->c2.buf = d->c->c2.buffers->read_tun_buf;
+                d->a = 1;
+            }
+        }
+    }
+}
+
+void *threaded_process_io(void *a)
+{
+    struct dual_args *d = (struct dual_args *)a;
+    while (true)
+    {
+        if (d->b->p->z != 1) { break; }
+        pthread_mutex_lock(&(d->i));
+        if (d->b->p->z != 1) { break; }
+        threaded_dual_init(d);
+        if (d->a == 1)
+        {
+            process_io(d->c, d->c->c2.link_sockets[0], d->b, d->z);
+        }
+        pthread_mutex_unlock(&(d->o));
+    }
+    return NULL;
 }
