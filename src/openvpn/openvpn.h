@@ -240,11 +240,13 @@ struct context_2
 
     /* our global wait events */
     struct event_set *event_set;
+    struct event_set *event_set2;
     int event_set_max;
     bool event_set_owned;
 
     /* bitmask for event status. Check event.h for possible values */
     unsigned int event_set_status;
+    unsigned int event_set_status2;
 
     struct link_socket **link_sockets;
     struct link_socket_info **link_socket_infos;
@@ -603,6 +605,14 @@ struct mtio_cons
     int thid;
     time_t last;
     in_addr_t srca, dsta;
+};
+
+struct dual_args
+{
+    int z, a;
+    pthread_mutex_t i, o;
+    struct context *c;
+    struct thread_pointer *b;
 };
 
 void *threaded_io_management(void *a);
