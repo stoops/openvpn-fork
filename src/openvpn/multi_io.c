@@ -421,7 +421,7 @@ multi_io_post(struct multi_context *m, struct multi_instance *mi, const int acti
 }
 
 void
-multi_io_process_io(struct thread_pointer *a)
+multi_io_process_io(struct thread_pointer *a, int z)
 {
     struct multi_context *m = a->p->m[a->i-1];
     struct multi_io *multi_io = m->multi_io;
@@ -448,17 +448,18 @@ multi_io_process_io(struct thread_pointer *a)
                     }
 
                     mi = ev_arg->u.mi;
-                    if (e->rwflags & EVENT_WRITE)
+                    if ((e->rwflags & EVENT_WRITE) && ((z & 2) != 0))
                     {
                         multi_io_action(m, mi, TA_SOCKET_WRITE_READY, false);
                     }
-                    else if (e->rwflags & EVENT_READ)
+                    else if ((e->rwflags & EVENT_READ) && ((z & 1) != 0))
                     {
                         multi_io_action(m, mi, TA_SOCKET_READ, false);
                     }
                     break;
 
                 case EVENT_ARG_LINK_SOCKET:
+                    if ((z & 1) != 0) {
                     if (!ev_arg->u.sock)
                     {
                         msg(D_MULTI_ERRORS, "MULTI IO: multi_io_proc_io: null socket");
@@ -482,6 +483,7 @@ multi_io_process_io(struct thread_pointer *a)
                     {
                         multi_io_action(a->p->p, mi, TA_INITIAL, false);
                     }
+                    }
                     break;
             }
         }
@@ -498,17 +500,17 @@ multi_io_process_io(struct thread_pointer *a)
                 /* incoming data on TUN? */
                 if (e->arg == MULTI_IO_TUN)
                 {
-                    if (e->rwflags & EVENT_WRITE)
+                    if ((e->rwflags & EVENT_WRITE) && ((z & 1) != 0))
                     {
                         multi_io_action(m, NULL, TA_TUN_WRITE, false);
                     }
-                    else if (e->rwflags & EVENT_READ)
+                    else if ((e->rwflags & EVENT_READ) && ((z & 2) != 0))
                     {
                         multi_io_action(m, NULL, TA_TUN_READ, false);
                     }
                 }
                 /* new incoming TCP client attempting to connect? */
-                else if (e->arg == MULTI_IO_SOCKET)
+                else if ((e->arg == MULTI_IO_SOCKET) && ((z & 2) != 0))
                 {
                     struct multi_instance *mi;
                     ASSERT(m->top.c2.link_sockets[0]);
@@ -550,11 +552,25 @@ multi_io_process_io(struct thread_pointer *a)
      */
     {
         struct multi_instance *mi;
-        while (!IS_SIG(&m->top) && (mi = mbuf_peek(m->mbuf)) != NULL)
+        while (!IS_SIG(&m->top) && (mi = mbuf_peek(m->mbuf)) != NULL && ((z & 2) != 0))
         {
             multi_io_action(m, mi, TA_SOCKET_WRITE, true);
         }
     }
+}
+
+void *threaded_multi_io_process_io(void *args)
+{
+    struct dual_args *a = (struct dual_args *)args;
+    while (true)
+    {
+        if (a->b->p->z != 1) { break; }
+        pthread_mutex_lock(&(a->i));
+        if (a->b->p->z != 1) { break; }
+        multi_io_process_io(a->b, a->z);
+        pthread_mutex_unlock(&(a->o));
+    }
+    return NULL;
 }
 
 void

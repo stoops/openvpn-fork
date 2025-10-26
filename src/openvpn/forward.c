@@ -2521,7 +2521,7 @@ void threaded_fwd_inp_intf(struct context *c, struct link_socket *sock, struct t
 }
 
 void
-process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b)
+process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b, int z)
 {
     const unsigned int status = c->c2.event_set_status;
 
@@ -2534,17 +2534,17 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
 #endif
 
     /* TCP/UDP port ready to accept write */
-    if (status & SOCKET_WRITE)
+    if ((status & SOCKET_WRITE) && ((z & 2) != 0))
     {
         process_outgoing_link(c, sock);
     }
     /* TUN device ready to accept write */
-    else if (status & TUN_WRITE)
+    else if ((status & TUN_WRITE) && ((z & 1) != 0))
     {
         process_outgoing_tun(c, sock);
     }
     /* Incoming data on TCP/UDP port */
-    else if (status & SOCKET_READ)
+    else if ((status & SOCKET_READ) && ((z & 1) != 0))
     {
         read_incoming_link(c, sock);
         if (!IS_SIG(c))
@@ -2553,7 +2553,7 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
         }
     }
     /* Incoming data on TUN device */
-    else if (status & TUN_READ)
+    else if ((status & TUN_READ) && ((z & 2) != 0))
     {
         threaded_fwd_inp_intf(c, sock, b);
     }
@@ -2564,4 +2564,18 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
             process_incoming_dco(c);
         }
     }
+}
+
+void *threaded_process_io(void *args)
+{
+    struct dual_args *a = (struct dual_args *)args;
+    while (true)
+    {
+        if (a->b->p->z != 1) { break; }
+        pthread_mutex_lock(&(a->i));
+        if (a->b->p->z != 1) { break; }
+        process_io(a->c, a->c->c2.link_sockets[0], a->b, a->z);
+        pthread_mutex_unlock(&(a->o));
+    }
+    return NULL;
 }

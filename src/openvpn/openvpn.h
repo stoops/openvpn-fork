@@ -604,6 +604,14 @@ struct mtio_cons
     in_addr_t srca, dsta;
 };
 
+struct dual_args
+{
+    int z;
+    pthread_mutex_t i, o;
+    struct context *c;
+    struct thread_pointer *b;
+};
+
 void *threaded_io_management(void *args);
 
 

@@ -4557,6 +4557,25 @@ static void tunnel_server_loop(struct thread_pointer *b)
         }
     }
 
+    bool dual_mode = d->options.ce.dual_mode;
+    struct dual_args link, intf;
+    pthread_t thrl, thri;
+
+    if (dual_mode)
+    {
+        pthread_mutex_init(&(link.i), NULL); pthread_mutex_init(&(link.o), NULL);
+        pthread_mutex_lock(&(link.i)); pthread_mutex_lock(&(link.o));
+        link.c = c; link.b = b; link.z = 1;
+        bzero(&(thrl), sizeof(pthread_t));
+        pthread_create(&(thrl), NULL, threaded_multi_io_process_io, &link);
+
+        pthread_mutex_init(&(intf.i), NULL); pthread_mutex_init(&(intf.o), NULL);
+        pthread_mutex_lock(&(intf.i)); pthread_mutex_lock(&(intf.o));
+        intf.c = c; intf.b = b; intf.z = 2;
+        bzero(&(thri), sizeof(pthread_t));
+        pthread_create(&(thri), NULL, threaded_multi_io_process_io, &intf);
+    }
+
     msg(M_INFO, "TCPv4_SERVER MTIO init [%d][%d] [%d][%d] {%d}{%d}", b->h, b->n, p->h, p->n, p->z, b->i);
 
     while (true)
@@ -4586,7 +4605,15 @@ static void tunnel_server_loop(struct thread_pointer *b)
         if (status > 0)
         {
             /* process the I/O which triggered select */
-            multi_io_process_io(b);
+            if (dual_mode)
+            {
+                pthread_mutex_unlock(&(link.i)); pthread_mutex_unlock(&(intf.i));
+                pthread_mutex_lock(&(link.o)); pthread_mutex_lock(&(intf.o));
+            }
+            else
+            {
+                multi_io_process_io(b, 3);
+            }
         }
         else if (status == 0)
         {
@@ -4608,6 +4635,12 @@ static void tunnel_server_loop(struct thread_pointer *b)
         close(p->r[b->i-1][1]);
         c->c1.tuntap->fd = c->c1.tuntap->ff;
         c->c1.tuntap->ff = -1;
+    }
+
+    if (dual_mode)
+    {
+        pthread_mutex_unlock(&(link.i)); pthread_mutex_unlock(&(intf.i));
+        pthread_join(thrl, NULL); pthread_join(thri, NULL);
     }
 }
 

@@ -68,7 +68,9 @@ void multi_io_free(struct multi_io *multi_io);
 
 int multi_io_wait(struct multi_context *m);
 
-void multi_io_process_io(struct thread_pointer *a);
+void multi_io_process_io(struct thread_pointer *a, int z);
+
+void *threaded_multi_io_process_io(void *args);
 
 void multi_io_set_global_rw_flags(struct multi_context *m, struct multi_instance *mi);
 
