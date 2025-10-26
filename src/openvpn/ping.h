@@ -76,8 +76,7 @@ static inline void
 check_ping_send(struct context *c)
 {
     if (c->options.ping_send_timeout
-        && event_timeout_trigger(&c->c2.ping_send_interval, &c->c2.timeval,
-                                 !TO_LINK_DEF(c) ? ETT_DEFAULT : 1))
+        && event_timeout_trigger(&c->c2.ping_send_interval, &c->c2.timeval, !TO_LINK_DEF(c) ? ETT_DEFAULT : 1))
     {
         check_ping_send_dowork(c);
     }

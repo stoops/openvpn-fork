@@ -57,6 +57,10 @@
 #define MAX_STRLENG 64
 #define MAX_CSTATES 16421
 
+#define THREAD_RTWL (1 << 0)
+#define THREAD_RLWT (1 << 1)
+#define THREAD_MAIN (THREAD_RTWL | THREAD_RLWT)
+
 /*
  * Our global key schedules, packaged thusly
  * to facilitate key persistence.
@@ -265,12 +269,6 @@ struct context_2
 
     /* MTU frame parameters */
     struct frame frame; /* Active frame parameters */
-
-#ifdef ENABLE_FRAGMENT
-    /* Object to handle advanced MTU negotiation and datagram fragmentation */
-    struct fragment_master *fragment;
-    struct frame frame_fragment;
-#endif
 
     /*
      * Traffic shaper object.
@@ -611,6 +609,14 @@ struct mtio_cons
     int thid;
     time_t last;
     in_addr_t srca, dsta;
+};
+
+struct dual_args
+{
+    int a, f, t, z;
+    int w[2][2];
+    struct context *c;
+    struct thread_pointer *b;
 };
 
 void *threaded_io_management(void *a);

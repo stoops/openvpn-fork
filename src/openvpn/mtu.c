@@ -122,13 +122,6 @@ frame_calculate_payload_overhead(size_t extra_tun, const struct options *options
         overhead += 1;
     }
 #endif
-#if defined(ENABLE_FRAGMENT)
-    /* Add the size of the fragment header (uint32_t) */
-    if (options->ce.fragment)
-    {
-        overhead += 4;
-    }
-#endif
 
     if (cipher_kt_mode_cbc(kt->cipher))
     {
@@ -204,9 +197,6 @@ frame_print(const struct frame *frame, msglvl_t msglevel, const char *prefix)
     }
     buf_printf(&out, "[");
     buf_printf(&out, " mss_fix:%" PRIu16, frame->mss_fix);
-#ifdef ENABLE_FRAGMENT
-    buf_printf(&out, " max_frag:%d", frame->max_fragment_size);
-#endif
     buf_printf(&out, " tun_mtu:%d", frame->tun_mtu);
     buf_printf(&out, " tun_max_mtu:%d", frame->tun_max_mtu);
     buf_printf(&out, " headroom:%d", frame->buf.headroom);
