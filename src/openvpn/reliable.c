@@ -141,7 +141,7 @@ reliable_ack_acknowledge_packet_id(struct reliable_ack *ack, packet_id_type pid)
 
 
 bool
-reliable_ack_read(struct reliable_ack *ack, struct buffer *buf, const struct session_id *sid)
+reliable_ack_read(struct reliable_ack *ack, struct buffer *buf, struct tls_multi *multi)
 {
     struct session_id session_id_remote;
 
@@ -150,15 +150,27 @@ reliable_ack_read(struct reliable_ack *ack, struct buffer *buf, const struct ses
         return false;
     }
 
-    if (ack->len >= 1
-        && (!session_id_defined(&session_id_remote) || !session_id_equal(&session_id_remote, sid)))
+    if (ack->len >= 1)
     {
+        if (session_id_defined(&session_id_remote))
+        {
+            for (int i = 0; i < TM_SIZE; ++i)
+            {
+                struct tls_session *session = &multi->session[i];
+                if (session_id_equal(&session_id_remote, &session->session_id))
+                {
+                    return true;
+                }
+            }
+        }
+
         struct gc_arena gc = gc_new();
-        dmsg(D_REL_LOW, "ACK read BAD SESSION-ID FROM REMOTE, local=%s, remote=%s",
-             session_id_print(sid, &gc), session_id_print(&session_id_remote, &gc));
+        dmsg(D_REL_LOW, "ACK read BAD SESSION-ID FROM REMOTE remote=%s", session_id_print(&session_id_remote, &gc));
         gc_free(&gc);
+
         return false;
     }
+
     return true;
 }
 
@@ -698,7 +710,7 @@ interval_t
 reliable_send_timeout(const struct reliable *rel)
 {
     struct gc_arena gc = gc_new();
-    interval_t ret = BIG_TIMEOUT;
+    interval_t ret = 7;
     const time_t local_now = now;
 
     for (int i = 0; i < rel->size; ++i)

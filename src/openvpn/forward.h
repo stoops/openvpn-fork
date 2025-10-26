@@ -37,11 +37,14 @@
 #define BULK_MODE(c) (c && c->c2.frame.bulk_size > 0)
 #define BULK_DATA(b) (b && (b->bulk_leng > 0) && (b->bulk_indx < b->bulk_leng))
 #define INST_LENG(a) (a && (a->inst_leng > 0) && (a->inst_indx < a->inst_leng) && (a->pending == NULL))
-#define LINK_LEFT(i) (i && sockets_read_residual(i))
+#define LINK_SOCK(s) (s && s->context.c2.link_sockets && s->context.c2.link_sockets[0])
+#define LINK_LEFT(l) (LINK_SOCK(l) && sockets_read_residual(l->context.c2.link_sockets, 1))
+#define LINK_QUED(q) (q && q->context.c2.tls_multi && q->context.c2.tls_multi->plaintext_write_buf.len)
 
 #define TUN_OUT(c)  (BLEN(&(c)->c2.to_tun) > 0)
 #define LINK_OUT(c) (BLEN(&(c)->c2.to_link) > 0)
-#define ANY_OUT(c)  (TUN_OUT(c) || LINK_OUT(c))
+#define KEYRE_OUT(c) (c && c->c2.tls_multi && c->c2.tls_multi->plaintext_write_buf.len)
+#define ANY_OUT(c)  (TUN_OUT(c) || LINK_OUT(c) || KEYRE_OUT(c))
 
 #ifdef ENABLE_FRAGMENT
 #define TO_LINK_FRAG(c) ((c)->c2.fragment && fragment_outgoing_defined((c)->c2.fragment))
@@ -73,16 +76,19 @@ extern counter_type link_read_bytes_global;
 
 extern counter_type link_write_bytes_global;
 
+
 void get_io_flags_dowork_udp(struct context *c, struct multi_io *multi_io,
                              const unsigned int flags);
 
 void get_io_flags_udp(struct context *c, struct multi_io *multi_io, const unsigned int flags);
 
-void io_wait_dowork(struct context *c, const unsigned int flags);
+void io_wait_dowork(struct context *c, const unsigned int flags, int t);
 
 void pre_select(struct context *c);
 
-void process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b);
+void process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b, int t);
+
+void *threaded_process_io(void *a);
 
 
 /**********************************************************************/
@@ -310,8 +316,7 @@ bool send_control_channel_string(struct context *c, const char *str, msglvl_t ms
  * @param msglevel   - Message level to use for logging
  */
 
-bool send_control_channel_string_dowork(struct tls_session *session, const char *str,
-                                        msglvl_t msglevel);
+bool send_control_channel_string_dowork(struct tls_multi *multi, struct key_state *ks, const char *str, msglvl_t msglevel);
 
 
 /**
@@ -371,11 +376,11 @@ static inline unsigned int
 p2p_iow_flags(const struct context *c)
 {
     unsigned int flags = (IOW_SHAPER | IOW_CHECK_RESIDUAL | IOW_FRAG | IOW_READ | IOW_WAIT_SIGNAL);
-    if (c->c2.to_link.len > 0)
+    if (LINK_OUT(c) || KEYRE_OUT(c))
     {
         flags |= IOW_TO_LINK;
     }
-    if (c->c2.to_tun.len > 0)
+    if (TUN_OUT(c))
     {
         flags |= IOW_TO_TUN;
     }
@@ -387,7 +392,7 @@ p2p_iow_flags(const struct context *c)
  * for the top-level server sockets.
  */
 static inline void
-io_wait(struct context *c, const unsigned int flags)
+io_wait(struct context *c, const unsigned int flags, int t)
 {
     if (proto_is_dgram(c->c2.link_sockets[0]->info.proto) && c->c2.fast_io
         && (flags & (IOW_TO_TUN | IOW_TO_LINK | IOW_MBUF)))
@@ -407,7 +412,7 @@ io_wait(struct context *c, const unsigned int flags)
     else
     {
         /* slow path */
-        io_wait_dowork(c, flags);
+        io_wait_dowork(c, flags, t);
     }
 }
 
