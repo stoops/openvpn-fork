@@ -2402,6 +2402,9 @@ multi_client_generate_tls_keys(struct context *c)
         return false;
     }
 
+    session = &c->c2.tls_multi->session[TM_THREADZ];
+    tls_session_update_crypto_params(c->c2.tls_multi, session, &c->options, &c->c2.frame, frame_fragment, get_link_socket_info(c), &c->c1.tuntap->dco);
+
     return true;
 }
 
@@ -4382,6 +4385,10 @@ management_client_pending_auth(void *arg, const unsigned long cid, const unsigne
         else if (multi->session[TM_ACTIVE].key[KS_PRIMARY].mda_key_id == mda_key_id)
         {
             session = &multi->session[TM_ACTIVE];
+        }
+        else if (multi->session[TM_THREADZ].key[KS_PRIMARY].mda_key_id == mda_key_id)
+        {
+            session = &multi->session[TM_THREADZ];
         }
         else
         {
