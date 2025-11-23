@@ -745,32 +745,9 @@ reliable_send_timeout(const struct reliable *rel)
  */
 
 void
-reliable_mark_active_incoming(struct reliable *rel, struct buffer *buf, packet_id_type pid,
-                              int opcode)
+reliable_mark_active_incoming(struct buffer *buf, packet_id_type pid, int opcode)
 {
-    for (int i = 0; i < rel->size; ++i)
-    {
-        struct reliable_entry *e = &rel->array[i];
-        if (buf == &e->buf)
-        {
-            e->active = true;
-
-            /* packets may not arrive in sequential order */
-            e->packet_id = pid;
-
-            /* check for replay */
-            ASSERT(!reliable_pid_min(pid, rel->packet_id));
-
-            e->opcode = opcode;
-            e->next_try = 0;
-            e->timeout = 0;
-            e->n_acks = 0;
-            dmsg(D_REL_DEBUG, "ACK mark active incoming ID " packet_id_format,
-                 (packet_id_print_type)e->packet_id);
-            return;
-        }
-    }
-    ASSERT(0); /* buf not found in rel */
+    /* no-op */
 }
 
 /*
@@ -778,29 +755,13 @@ reliable_mark_active_incoming(struct reliable *rel, struct buffer *buf, packet_i
  */
 
 void
-reliable_mark_active_outgoing(struct reliable *rel, struct buffer *buf, int opcode)
+reliable_mark_active_outgoing(struct buffer *buf, int opcode)
 {
-    for (int i = 0; i < rel->size; ++i)
-    {
-        struct reliable_entry *e = &rel->array[i];
-        if (buf == &e->buf)
-        {
-            /* Write mode, increment packet_id (i.e. sequence number)
-             * linearly and prepend id to packet */
-            packet_id_type net_pid;
-            e->packet_id = rel->packet_id++;
-            net_pid = htonpid(e->packet_id);
-            ASSERT(buf_write_prepend(buf, &net_pid, sizeof(net_pid)));
-            e->active = true;
-            e->opcode = opcode;
-            e->next_try = 0;
-            e->timeout = rel->initial_timeout;
-            dmsg(D_REL_DEBUG, "ACK mark active outgoing ID " packet_id_format,
-                 (packet_id_print_type)e->packet_id);
-            return;
-        }
-    }
-    ASSERT(0); /* buf not found in rel */
+    /* Write mode, increment packet_id (i.e. sequence number)
+     * linearly and prepend id to packet */
+    packet_id_type net_pid = 1337;
+    ASSERT(buf_write_prepend(buf, &net_pid, sizeof(net_pid)));
+    dmsg(D_REL_DEBUG, "ACK mark active outgoing ID");
 }
 
 /* delete a buffer previously activated by reliable_mark_active() */

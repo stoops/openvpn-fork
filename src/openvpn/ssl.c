@@ -187,7 +187,6 @@ tls_init_control_channel_frame_parameters(struct frame *frame, int tls_mtu)
 static size_t
 calc_control_channel_frame_overhead(const struct tls_session *session)
 {
-    const struct key_state *ks = &session->key[KS_MAIN];
     size_t overhead = 0;
 
     /* opcode */
@@ -197,8 +196,7 @@ calc_control_channel_frame_overhead(const struct tls_session *session)
     overhead += SID_SIZE;
 
     /* ACK array and remote SESSION ID (part of the ACK array) */
-    int ackstosend = reliable_ack_outstanding(ks->rec_ack) + ks->lru_acks->len;
-    overhead += ACK_SIZE(min_int(ackstosend, CONTROL_SEND_ACK_MAX));
+    overhead += ACK_SIZE(CONTROL_SEND_ACK_MAX);
 
     /* Message packet id */
     overhead += sizeof(packet_id_type);
@@ -855,16 +853,14 @@ key_state_init(struct tls_multi *multi, struct tls_session *session, struct key_
     ks->peer_last_packet = &multi->peer_last_packet;
     ks->paybuf = calloc(1, sizeof(struct buffer_list *));
     *ks->paybuf = multi->paybuf;
-    ks->send_reliable = multi->send_reliable;
-    ks->rec_reliable = multi->rec_reliable;
-    ks->rec_ack = multi->rec_ack;
-    ks->lru_acks = multi->lru_acks;
 
     /* allocate buffers */
+    ks->op_code_recv = -1;
+    ks->op_code_send = -1;
+    ks->pkt_buf_recv = alloc_buf(TLS_CHANNEL_BUF_SIZE);
+    ks->pkt_buf_send = alloc_buf(TLS_CHANNEL_BUF_SIZE);
     ks->plaintext_read_buf = alloc_buf(TLS_CHANNEL_BUF_SIZE);
     ks->plaintext_write_buf = alloc_buf(TLS_CHANNEL_BUF_SIZE);
-    ks->ack_read_buf = alloc_buf(TLS_CHANNEL_BUF_SIZE);
-    ks->ack_write_buf = alloc_buf(BUF_SIZE(&session->opt->frame));
 
     /* init packet ID tracker */
     packet_id_init(&ks->crypto_options.packet_id, session->opt->replay_window,
@@ -910,8 +906,8 @@ key_state_free(struct key_state *ks, bool clear)
     free_epoch_key_ctx(&ks->crypto_options);
     free_buf(&ks->plaintext_read_buf);
     free_buf(&ks->plaintext_write_buf);
-    free_buf(&ks->ack_read_buf);
-    free_buf(&ks->ack_write_buf);
+    free_buf(&ks->pkt_buf_recv);
+    free_buf(&ks->pkt_buf_send);
 
     free(ks->paybuf);
     free(ks->key_src);
@@ -977,7 +973,7 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
 {
     struct gc_arena gc = gc_new();
 
-    dmsg(D_TLS_DEBUG, "TLS: tls_session_init: entry");
+    dmsg(D_TLS_DEBUG_LOW, "TLS: tls_session_init: entry");
 
     CLEAR(*session);
 
@@ -1034,12 +1030,6 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
         /* load most recent packet-id to replay protect on --tls-auth */
         packet_id_persist_load_obj(multi->opt.tls_wrap.opt.pid_persist, &multi->opt.tls_wrap.opt.packet_id);
 
-        reliable_init(multi->send_reliable, BUF_SIZE(&multi->opt.frame),
-                      multi->opt.frame.buf.headroom, TLS_RELIABLE_N_SEND_BUFFERS, false);
-        reliable_init(multi->rec_reliable, BUF_SIZE(&multi->opt.frame),
-                      multi->opt.frame.buf.headroom, TLS_RELIABLE_N_REC_BUFFERS, false);
-        reliable_set_timeout(multi->send_reliable, multi->opt.packet_timeout);
-
         multi->acks_init = true;
     }
 
@@ -1048,7 +1038,7 @@ tls_session_init(struct tls_multi *multi, struct tls_session *session)
         key_state_init(multi, session, &session->key[i]);
     }
 
-    dmsg(D_TLS_DEBUG, "TLS: tls_session_init: new session object, sid=%s",
+    dmsg(D_TLS_DEBUG_LOW, "TLS: tls_session_init: new session object, sid=%s",
          session_id_print(&session->session_id, &gc));
 
     gc_free(&gc);
@@ -1108,7 +1098,7 @@ move_session(struct tls_multi *multi, int dest, int src, bool reinit_src)
         secure_memzero(&multi->session[src], sizeof(multi->session[src]));
     }
 
-    dmsg(D_TLS_DEBUG, "TLS: move_session: exit");
+    dmsg(D_TLS_DEBUG_LOW, "TLS: move_session: exit");
 }
 
 static void
@@ -1155,11 +1145,6 @@ tls_multi_init(struct tls_options *tls_options)
     ALLOC_OBJ(ret->cert_hash_set->ch[MAX_CERT_DEPTH-1], struct cert_hash);
 
     ret->acks_init = false;
-    ALLOC_OBJ_CLEAR(ret->send_reliable, struct reliable);
-    ALLOC_OBJ_CLEAR(ret->rec_reliable, struct reliable);
-    ALLOC_OBJ_CLEAR(ret->rec_ack, struct reliable_ack);
-    ALLOC_OBJ_CLEAR(ret->lru_acks, struct reliable_ack);
-
     ret->plaintext_read_buf = alloc_buf(TLS_CHANNEL_BUF_SIZE);
     ret->plaintext_write_buf = alloc_buf(TLS_CHANNEL_BUF_SIZE);
 
@@ -1273,10 +1258,6 @@ tls_multi_free(struct tls_multi *multi, bool clear)
     free_buf(&multi->plaintext_read_buf);
     free_buf(&multi->plaintext_write_buf);
     buffer_list_free(multi->paybuf);
-    reliable_free(multi->send_reliable);
-    reliable_free(multi->rec_reliable);
-    free(multi->rec_ack);
-    free(multi->lru_acks);
 
     free(multi->common_name);
     tls_wrap_free(&multi->opt.tls_wrap);
@@ -2290,7 +2271,7 @@ export_user_keying_material(struct tls_session *session, struct key_state *ks)
             const char *key = format_hex_ex(ekm, size, len, 0, NULL, &gc);
             setenv_str(session->opt->es, "exported_keying_material", key);
 
-            dmsg(D_TLS_DEBUG_MED, "%s: exported keying material: %s", __func__, key);
+            dmsg(D_TLS_DEBUG_LOW, "%s: exported keying material: %s", __func__, key);
             secure_memzero(ekm, size);
         }
         else
@@ -2491,32 +2472,28 @@ last:
  * @return if the state change was succesful
  */
 static bool
-session_move_pre_start(struct tls_multi *multi, const struct tls_session *session, struct key_state *ks,
-                       bool skip_initial_send)
+session_move_pre_start(struct tls_multi *multi, const struct tls_session *session, struct key_state *ks, bool skip_initial_send)
 {
-    struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
-    if (!buf)
+    int opcode = ks->initial_opcode;
+    struct buffer *buf = &ks->pkt_buf_send;
+
+    if (buf->len)
     {
         return false;
     }
 
+    ks->op_code_send = opcode;
     ks->initial = now;
 
-    /* null buffer */
-    reliable_mark_active_outgoing(ks->send_reliable, buf, ks->initial_opcode);
+    buf_init(buf, 150);
+    reliable_mark_active_outgoing(buf, opcode);
 
-    /* If we want to skip sending the initial handshake packet we still generate
-     * it to increase internal counters etc. but immediately mark it as done */
-    if (skip_initial_send)
-    {
-        reliable_mark_deleted(ks->send_reliable, buf);
-    }
     INCR_GENERATED;
 
     ks->state = skip_initial_send ? S_PRE_START_SKIP : S_PRE_START;
 
     struct gc_arena gc = gc_new();
-    dmsg(D_TLS_DEBUG, "TLS: Initial Handshake, sid=%s",
+    dmsg(D_TLS_DEBUG_LOW, "TLS: Initial Handshake, sid=%s",
          session_id_print(&session->session_id, &gc));
     gc_free(&gc);
 
@@ -2534,10 +2511,9 @@ session_move_pre_start(struct tls_multi *multi, const struct tls_session *sessio
  * machine if this is the initial connection.
  */
 static void
-session_move_active(struct tls_multi *multi, struct tls_session *session,
-                    struct link_socket_info *to_link_socket_info, struct key_state *ks)
+session_move_active(struct tls_multi *multi, struct tls_session *session, struct link_socket_info *to_link_socket_info, struct key_state *ks)
 {
-    dmsg(D_TLS_DEBUG_MED, "STATE S_ACTIVE");
+    dmsg(D_TLS_DEBUG_LOW, "STATE S_ACTIVE");
 
     ks->established = now;
     if (check_debug_level(D_HANDSHAKE))
@@ -2584,13 +2560,6 @@ session_skip_to_pre_start(struct tls_session *session, struct tls_pre_decrypt_st
     session->session_id = state->server_session_id;
     session->untrusted_addr = *from;
     session->burst = true;
-    /* The OpenVPN protocol implicitly mandates that packet id always start
-     * from 0 in the RESET packets as OpenVPN 2.x will not allow gaps in the
-     * ids and starts always from 0. Since we skip/ignore one (RESET) packet
-     * in each direction, we need to set the ids to 1 */
-    ks->rec_reliable->packet_id = 1;
-    /* for ks->send_reliable->packet_id, session_move_pre_start moves the
-     * counter to 1 */
     session->tls_wrap.opt.packet_id.send.id = 1;
     return session_move_pre_start(NULL, session, ks, true);
 }
@@ -2635,7 +2604,6 @@ parse_early_negotiation_tlvs(struct buffer *buf, struct key_state *ks)
                 buf_advance(buf, len);
         }
     }
-    reliable_mark_deleted(ks->rec_reliable, buf);
 
     return true;
 error:
@@ -2654,6 +2622,7 @@ read_incoming_tls_ciphertext(struct buffer *buf, struct key_state *ks, bool *con
     if (buf->len)
     {
         status = key_state_write_ciphertext(ks->ks_ssl, buf);
+        msg(M_INFO, "DEBUG-READ-2 [%d][%d]",buf->len,status);
         if (status == -1)
         {
             msg(D_TLS_ERRORS, "TLS Error: Incoming Ciphertext -> TLS object write error");
@@ -2666,9 +2635,8 @@ read_incoming_tls_ciphertext(struct buffer *buf, struct key_state *ks, bool *con
     }
     if (status == 1)
     {
-        reliable_mark_deleted(ks->rec_reliable, buf);
         *continue_tls_process = true;
-        dmsg(D_TLS_DEBUG, "Incoming Ciphertext -> TLS");
+        dmsg(D_TLS_DEBUG_LOW, "Incoming Ciphertext -> TLS");
     }
     return true;
 }
@@ -2676,17 +2644,16 @@ read_incoming_tls_ciphertext(struct buffer *buf, struct key_state *ks, bool *con
 static bool
 control_packet_needs_wkc(const struct key_state *ks)
 {
-    return (ks->crypto_options.flags & CO_RESEND_WKC) && (ks->send_reliable->packet_id == 1);
+    return false;
 }
 
-
 static bool
-read_incoming_tls_plaintext(struct key_state *ks, struct buffer *buf, interval_t *wakeup,
-                            bool *continue_tls_process)
+read_incoming_tls_plaintext(struct key_state *ks, struct buffer *buf, interval_t *wakeup, bool *continue_tls_process)
 {
     ASSERT(buf_init(buf, 0));
 
     int status = key_state_read_plaintext(ks->ks_ssl, buf);
+    msg(M_INFO, "DEBUG-READ-1 [%d][%d]",buf->len,status);
 
     update_time();
     if (status == -1)
@@ -2697,7 +2664,7 @@ read_incoming_tls_plaintext(struct key_state *ks, struct buffer *buf, interval_t
     if (status == 1)
     {
         *continue_tls_process = true;
-        dmsg(D_TLS_DEBUG, "TLS -> Incoming Plaintext");
+        dmsg(D_TLS_DEBUG_LOW, "TLS -> Incoming Plaintext");
 
         /* More data may be available, wake up again asap to check. */
         *wakeup = 0;
@@ -2708,8 +2675,10 @@ read_incoming_tls_plaintext(struct key_state *ks, struct buffer *buf, interval_t
 static bool
 write_outgoing_tls_ciphertext(struct tls_session *session, struct key_state *ks, bool *continue_tls_process)
 {
-    int rel_avail = reliable_get_num_output_sequenced_available(ks->send_reliable);
-    if (rel_avail == 0)
+    int rel_avail = 1;
+    struct buffer *buf = &ks->pkt_buf_send;
+
+    if (buf->len)
     {
         return true;
     }
@@ -2745,11 +2714,14 @@ write_outgoing_tls_ciphertext(struct tls_session *session, struct key_state *ks,
         max_pkt_len = TLS_CHANNEL_BUF_SIZE;
     }
 
+    maxlen = TLS_CHANNEL_BUF_SIZE;
+
     /* This seems a bit wasteful to allocate every time */
     struct gc_arena gc = gc_new();
     struct buffer tmp = alloc_buf_gc(maxlen, &gc);
 
     int status = key_state_read_ciphertext(ks->ks_ssl, &tmp);
+    msg(M_INFO, "DEBUG-XMIT-1 [%d][%d]",tmp.len,status);
 
     if (status == -1)
     {
@@ -2759,30 +2731,17 @@ write_outgoing_tls_ciphertext(struct tls_session *session, struct key_state *ks,
     }
     if (status == 1)
     {
-        /* Split the TLS ciphertext (TLS record) into multiple small packets
-         * that respect tls_mtu */
-        while (tmp.len > 0)
-        {
-            int len = max_pkt_len;
-            int opcode = P_CONTROL_V1;
-            if (control_packet_needs_wkc(ks))
-            {
-                opcode = P_CONTROL_WKC_V1;
-                len = max_int(0, len - buf_len(session->tls_wrap.tls_crypt_v2_wkc));
-            }
-            /* do not send more than available */
-            len = min_int(len, tmp.len);
+        int opcode = P_CONTROL_V1;
 
-            struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
-            /* we assert here since we checked for its availability before */
-            ASSERT(buf);
-            buf_copy_n(buf, &tmp, len);
+        ks->op_code_send = opcode;
+        buf_init(buf, 150);
+        buf_copy(buf, &tmp);
+        reliable_mark_active_outgoing(buf, opcode);
 
-            reliable_mark_active_outgoing(ks->send_reliable, buf, opcode);
-            INCR_GENERATED;
-            *continue_tls_process = true;
-        }
-        dmsg(D_TLS_DEBUG, "Outgoing Ciphertext -> Reliable");
+        INCR_GENERATED;
+
+        *continue_tls_process = true;
+        dmsg(D_TLS_DEBUG_LOW, "Outgoing Ciphertext -> Reliable");
     }
 
     gc_free(&gc);
@@ -2790,14 +2749,13 @@ write_outgoing_tls_ciphertext(struct tls_session *session, struct key_state *ks,
 }
 
 static bool
-check_outgoing_ciphertext(struct key_state *ks, struct tls_session *session,
-                          bool *continue_tls_process)
+check_outgoing_ciphertext(struct key_state *ks, struct tls_session *session, bool *continue_tls_process)
 {
     /* Outgoing Ciphertext to reliable buffer */
     if (ks->state >= S_START)
     {
-        struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
-        if (buf)
+        struct buffer *buf = &ks->pkt_buf_send;
+        if (!buf->len)
         {
             if (!write_outgoing_tls_ciphertext(session, ks, continue_tls_process))
             {
@@ -2822,6 +2780,11 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
     bool continue_tls_process = false;
     struct key_state *ks = &session->key[KS_MAIN]; /* primary key */
 
+    if (!to_link->len && ks->op_code_send < 0)
+    {
+        ks->pkt_buf_send.len = 0;
+    }
+
     /* Initial handshake */
     if (ks->state == S_INITIAL)
     {
@@ -2831,20 +2794,20 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
     /* Check if the initial three-way Handshake is complete.
      * We consider the handshake to be complete when our own initial
      * packet has been successfully ACKed. */
-    if (ks->state == S_PRE_START && reliable_empty(ks->send_reliable))
+    if (ks->state == S_PRE_START && !ks->pkt_buf_send.len)
     {
         ks->state = S_START;
         continue_tls_process = true;
 
         /* New connection, remove any old X509 env variables */
         //tls_x509_clear_env(multi->opt.es);
-        dmsg(D_TLS_DEBUG_MED, "STATE S_START");
+        dmsg(D_TLS_DEBUG_LOW, "STATE S_START");
     }
 
     /* Wait for ACK */
     if (((ks->state == S_GOT_KEY && !session->opt->server)
          || (ks->state == S_SENT_KEY && session->opt->server))
-        && reliable_empty(ks->send_reliable))
+        && !ks->pkt_buf_send.len)
     {
         session_move_active(multi, session, to_link_socket_info, ks);
         continue_tls_process = true;
@@ -2852,18 +2815,19 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
 
     /* Reliable buffer to outgoing TCP/UDP (send up to CONTROL_SEND_ACK_MAX ACKs
      * for previously received packets) */
-    if (!to_link->len && reliable_can_send(ks->send_reliable))
+    struct buffer *sndb = &ks->pkt_buf_send;
+    if (!to_link->len && sndb->len && ks->op_code_send >= 0)
     {
-        int opcode;
+        int opcode = ks->op_code_send;
+        struct buffer b = *sndb;
 
-        struct buffer *buf = reliable_send(ks->send_reliable, &opcode);
-        ASSERT(buf);
-        struct buffer b = *buf;
-        INCR_SENT;
+        ASSERT(buf_init(&b, multi->opt.frame.buf.headroom));
 
         write_control_auth(multi, session, ks, &b, to_link_addr, opcode, CONTROL_SEND_ACK_MAX, true);
         *to_link = b;
-        dmsg(D_TLS_DEBUG, "Reliable -> TCP/UDP");
+
+        ks->op_code_send = -1;
+        dmsg(D_TLS_DEBUG_LOW, "Reliable -> TCP/UDP");
 
         /* This changed the state of the outgoing buffer. In order to avoid
          * running this function again/further and invalidating the key_state
@@ -2884,25 +2848,27 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
     }
 
     /* Write incoming ciphertext to TLS object */
-    struct reliable_entry *entry = reliable_get_entry_sequenced(ks->rec_reliable);
-    if (entry)
-    {
+    struct buffer *recb = &ks->pkt_buf_recv;
+    if (ks->op_code_recv >= 0)
+    {msg(M_INFO,"DEBUG-RECV-9 [%d][%d]",recb->len,ks->op_code_recv);
         /* The first packet from the peer (the reset packet) is special and
          * contains early protocol negotiation */
-        if (entry->packet_id == 0 && is_hard_reset_method2(entry->opcode))
-        {
-            if (!parse_early_negotiation_tlvs(&entry->buf, ks))
+        if (is_hard_reset_method2(ks->op_code_recv))
+        {msg(M_INFO,"DEBUG-RECV-7 [%d][%d]",recb->len,ks->op_code_recv);
+            if (!parse_early_negotiation_tlvs(recb, ks))
             {
                 goto error;
             }
         }
         else
         {
-            if (!read_incoming_tls_ciphertext(&entry->buf, ks, &continue_tls_process))
+            if (!read_incoming_tls_ciphertext(recb, ks, &continue_tls_process))
             {
                 goto error;
             }
         }
+        ks->op_code_recv = -1;
+        recb->len = 0;
     }
 
     struct tls_session *sn = &multi->session[TM_INIT];
@@ -2929,7 +2895,7 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
         if (key_method_2_write(buf2, multi, sn, kx))
         {
             continue_tls_process = true;
-            dmsg(D_TLS_DEBUG_MED, "STATE S_SENT_KEY [%d][%d]", kx->key_id, kx->state);
+            dmsg(D_TLS_DEBUG_LOW, "STATE S_SENT_KEY [%d][%d]", kx->key_id, kx->state);
             kx->state = S_SENT_KEY;
         }
     }
@@ -2942,10 +2908,10 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
         if (!key_method_2_write(buf, multi, session, ks))
         {
             goto error;
-        }
+        }msg(M_INFO, "DEBUG-SEND-1 [%d]",buf->len);
 
         continue_tls_process = true;
-        dmsg(D_TLS_DEBUG_MED, "STATE S_SENT_KEY");
+        dmsg(D_TLS_DEBUG_LOW, "STATE S_SENT_KEY");
         ks->state = S_SENT_KEY;
     }
 
@@ -2958,7 +2924,7 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
         if (key_method_2_read(buf2, multi, sn, kx))
         {
             continue_tls_process = true;
-            dmsg(D_TLS_DEBUG_MED, "STATE S_GOT_KEY [%d][%d]", kx->key_id, kx->state);
+            dmsg(D_TLS_DEBUG_LOW, "STATE S_GOT_KEY [%d][%d]", kx->key_id, kx->state);
             kx->state = S_GOT_KEY;
         }
         buf2->len = 0;
@@ -2972,10 +2938,10 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
         if (!key_method_2_read(buf, multi, session, ks))
         {
             goto error;
-        }
+        }msg(M_INFO, "DEBUG-READ-2 [%d]",buf->len);
 
         continue_tls_process = true;
-        dmsg(D_TLS_DEBUG_MED, "STATE S_GOT_KEY");
+        dmsg(D_TLS_DEBUG_LOW, "STATE S_GOT_KEY");
         ks->state = S_GOT_KEY;
     }
 
@@ -2992,8 +2958,8 @@ tls_process_state(struct tls_multi *multi, struct tls_session *session, struct b
         if (status == 1)
         {
             continue_tls_process = true;
-            dmsg(D_TLS_DEBUG, "Outgoing Plaintext -> TLS");
-        }
+            dmsg(D_TLS_DEBUG_LOW, "Outgoing Plaintext -> TLS");
+        }msg(M_INFO, "DEBUG-SEND-2 [%d][%d]",buf->len,status);
     }
 
     if (!check_outgoing_ciphertext(ks, session, &continue_tls_process))
@@ -3140,7 +3106,7 @@ tls_process(struct tls_multi *multi, struct tls_session *session, struct buffer 
     {
         update_time();
 
-        dmsg(D_TLS_DEBUG, "TLS: tls_process: chg=%d ks=%s to_link->len=%d wakeup=%d",
+        dmsg(D_TLS_DEBUG_LOW, "TLS: tls_process: chg=%d ks=%s to_link->len=%d wakeup=%d",
              continue_tls_process, state_name(ks->state), to_link->len, *wakeup);
         continue_tls_process = tls_process_state(multi, session, to_link, to_link_addr, to_link_socket_info, wakeup);
 
@@ -3157,40 +3123,27 @@ tls_process(struct tls_multi *multi, struct tls_session *session, struct buffer 
      * However, with the P_CONTROL_WKC_V1 we need to ensure that the packet
      * gets resent if not received by remote, so instead we use an empty
      * control packet in this special case */
-
-    /* Send 1 or more ACKs (each received control packet gets one ACK) */
-    if (!to_link->len && !reliable_ack_empty(ks->rec_ack))
+    /*struct buffer *recb = &ks->pkt_buf_recv;
+    if (!to_link->len && ks->op_code_recv >= 0)
     {
-        if (control_packet_needs_wkc(ks))
-        {
-            struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
-            if (!buf)
-            {
-                return false;
-            }
+        struct buffer b = *recb;
 
-            /* We do not write anything to the buffer, this way this will be
-             * an empty control packet that gets the ack piggybacked and
-             * also appended the wrapped client key since it has a WCK opcode */
-            reliable_mark_active_outgoing(ks->send_reliable, buf, P_CONTROL_WKC_V1);
-        }
-        else
-        {
-            struct buffer buf = ks->ack_write_buf;
-            ASSERT(buf_init(&buf, multi->opt.frame.buf.headroom));
-            write_control_auth(multi, session, ks, &buf, to_link_addr, P_ACK_V1, RELIABLE_ACK_SIZE, false);
-            *to_link = buf;
-            dmsg(D_TLS_DEBUG, "Dedicated ACK -> TCP/UDP");
-        }
-    }
+        ASSERT(buf_init(&b, multi->opt.frame.buf.headroom));
+
+        write_control_auth(multi, session, ks, &b, to_link_addr, P_ACK_V1, RELIABLE_ACK_SIZE, false);
+        *to_link = b;
+
+        ks->op_code_recv = -1;
+        dmsg(D_TLS_DEBUG_LOW, "Dedicated ACK -> TCP/UDP");
+    }*/
 
     /* When should we wake up again? */
     if (ks->state >= S_INITIAL || ks->state == S_ERROR_PRE)
     {
-        compute_earliest_wakeup(wakeup, reliable_send_timeout(ks->send_reliable));
+        compute_earliest_wakeup(wakeup, 7);
     }
 
-    dmsg(D_TLS_DEBUG, "TLS: tls_process: timeout set to %d", *wakeup);
+    dmsg(D_TLS_DEBUG_LOW, "TLS: tls_process: timeout set to %d", *wakeup);
 
     /* prevent event-loop spinning by setting minimum wakeup of 1 second */
     if (*wakeup <= 0)
@@ -3244,31 +3197,6 @@ check_session_buf_not_used(struct buffer *to_link, struct tls_session *session)
         {
             continue;
         }
-
-        /* we don't expect send_reliable to be NULL when state is
-         * not S_UNDEF, but people have reported crashes nonetheless,
-         * therefore we better catch this event, report and exit.
-         */
-        if (!ks->send_reliable)
-        {
-            msg(M_FATAL,
-                "ERROR: session->key[%d]->send_reliable is NULL "
-                "while key state is %s. Exiting.",
-                i, state_name(ks->state));
-        }
-
-        for (int j = 0; j < ks->send_reliable->size; j++)
-        {
-            if (ks->send_reliable->array[j].buf.data == dataptr)
-            {
-                msg(M_INFO,
-                    "Warning buffer of freed TLS session is still in"
-                    " use (session->key[%d].send_reliable->array[%d])",
-                    i, j);
-
-                goto used;
-            }
-        }
     }
     return;
 
@@ -3321,7 +3249,7 @@ tls_multi_process(struct tls_multi *multi, struct buffer *to_link,
             continue;
         }
 
-        dmsg(D_TLS_DEBUG,
+        dmsg(D_TLS_DEBUG_LOW,
              "TLS: tls_multi_process: i=%d state=%s, mysid=%s, stored-sid=%s, stored-ip=%s", i,
              state_name(ks->state), session_id_print(&session->session_id, &gc),
              session_id_print(&ks->session_id_remote, &gc),
@@ -3750,7 +3678,7 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
     /*
      * Authenticate Packet
      */
-    dmsg(D_TLS_DEBUG, "TLS: control channel, op=%s, IP=%s", packet_opcode_name(op),
+    dmsg(D_TLS_DEBUG_LOW, "TLS: control channel, op=%s, IP=%s", packet_opcode_name(op),
          print_link_socket_actual(from, &gc));
 
     /* get remote session-id */
@@ -3773,7 +3701,7 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
         struct key_state *ks = &session->key[KS_MAIN];
 
         dmsg(
-            D_TLS_DEBUG,
+            D_TLS_DEBUG_LOW,
             "TLS: initial packet test, i=%d state=%s, mysid=%s, rec-sid=%s, rec-ip=%s, stored-sid=%s, stored-ip=%s",
             i, state_name(ks->state), session_id_print(&session->session_id, &gc),
             session_id_print(&sid, &gc), print_link_socket_actual(from, &gc),
@@ -3783,7 +3711,7 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
         if (session_id_equal(&ks->session_id_remote, &sid))
         /* found a match */
         {
-            dmsg(D_TLS_DEBUG, "TLS: found match, session[%d], sid=%s", i,
+            dmsg(D_TLS_DEBUG_LOW, "TLS: found match, session[%d], sid=%s", i,
                  session_id_print(&sid, &gc));
             break;
         }
@@ -3883,7 +3811,7 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
 
             key_state_soft_reset(multi, true, "P_CONTROL_SOFT_RESET_V1");
 
-            dmsg(D_TLS_DEBUG, "TLS: received P_CONTROL_SOFT_RESET_V1 s=%d sid=%s", i,
+            dmsg(D_TLS_DEBUG_LOW, "TLS: received P_CONTROL_SOFT_RESET_V1 s=%d sid=%s", i,
                  session_id_print(&sid, &gc));
         }
         else
@@ -3917,7 +3845,7 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
                 goto error;
             }
 
-            dmsg(D_TLS_DEBUG, "TLS: received control channel packet s#=%d sid=%s", i,
+            dmsg(D_TLS_DEBUG_LOW, "TLS: received control channel packet s#=%d sid=%s", i,
                  session_id_print(&sid, &gc));
         }
     }
@@ -3967,7 +3895,6 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
      */
     if (do_burst && !session->burst)
     {
-        reliable_schedule_now(ks->send_reliable);
         session->burst = true;
     }
 
@@ -3975,47 +3902,19 @@ tls_pre_decrypt(struct tls_multi *multi, const struct link_socket_actual *from, 
      * Process incoming ACKs for packets we can now
      * delete from reliable send buffer
      */
-    {
-        /* buffers all packet IDs to delete from send_reliable */
-        struct reliable_ack send_ack;
-
-        if (!reliable_ack_read(&send_ack, buf, multi))
+    struct buffer *in = &ks->pkt_buf_recv;
+    if (op != P_ACK_V1 && !in->len && ks->op_code_recv < 0)
+    {msg(M_INFO,"DEBUG-RECV-99 [%d][%d]",buf->len,op);
+        packet_id_type id = 1337;
+        /* Save incoming ciphertext packet to reliable buffer */
+        buf_init(in, 150);
+        if (!buf_copy(in, buf))
         {
-            msg(D_TLS_ERRORS, "TLS Error: reading acknowledgement record from packet");
+            msg(D_MULTI_DROPPED, "Incoming control channel packet too big, dropping.");
             goto error;
         }
-
-        reliable_send_purge(ks->send_reliable, &send_ack);
-    }
-
-    if (op != P_ACK_V1 && reliable_can_get(ks->rec_reliable))
-    {
-        packet_id_type id;
-
-        /* Extract the packet ID from the packet */
-        if (reliable_ack_read_packet_id(buf, &id))
-        {
-            /* Avoid deadlock by rejecting packet that would de-sequentialize receive buffer */
-            if (reliable_wont_break_sequentiality(ks->rec_reliable, id))
-            {
-                if (reliable_not_replay(ks->rec_reliable, id))
-                {
-                    /* Save incoming ciphertext packet to reliable buffer */
-                    struct buffer *in = reliable_get_buf(ks->rec_reliable);
-                    ASSERT(in);
-                    if (!buf_copy(in, buf))
-                    {
-                        msg(D_MULTI_DROPPED, "Incoming control channel packet too big, dropping.");
-                        goto error;
-                    }
-                    reliable_mark_active_incoming(ks->rec_reliable, in, id, op);
-                }
-
-                /* Process outgoing acknowledgment for packet just received, even if it's a replay
-                 */
-                reliable_ack_acknowledge_packet_id(ks->rec_ack, id);
-            }
-        }
+        ks->op_code_recv = op;
+        reliable_mark_active_incoming(in, id, op);
     }
 
     /* Remember that we received a valid control channel packet */
@@ -4072,7 +3971,7 @@ tls_prepend_opcode_v1(const struct tls_multi *multi, struct buffer *buf)
 {
     struct key_state *ks = multi->save_ks;
 
-    msg(D_TLS_DEBUG, __func__);
+    msg(D_TLS_DEBUG_LOW, __func__);
 
     ASSERT(ks);
     ASSERT(ks->key_id <= P_KEY_ID_MASK);
@@ -4087,7 +3986,7 @@ tls_prepend_opcode_v2(const struct tls_multi *multi, struct buffer *buf)
     struct key_state *ks = multi->save_ks;
     uint32_t peer;
 
-    msg(D_TLS_DEBUG, __func__);
+    msg(D_TLS_DEBUG_LOW, __func__);
 
     ASSERT(ks);
 
@@ -4101,7 +4000,7 @@ tls_prepend_opcode_k1(const struct tls_multi *multi, struct buffer *buf)
     struct key_state *ks = multi->save_ks;
     uint32_t peer;
 
-    msg(D_TLS_DEBUG, __func__);
+    msg(D_TLS_DEBUG_LOW, __func__);
 
     ASSERT(ks);
 

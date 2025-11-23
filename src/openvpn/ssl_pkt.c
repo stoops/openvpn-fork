@@ -190,7 +190,6 @@ write_control_auth(struct tls_multi *multi, struct tls_session *session, struct 
     }
 
     ASSERT(link_socket_actual_defined(&kx->remote_addr));
-    ASSERT(reliable_ack_write(kx->rec_ack, kx->lru_acks, buf, &kx->session_id_remote, max_ack, prepend_ack));
 
     msg(D_TLS_DEBUG, "%s(): %s", __func__, packet_opcode_name(opcode));
 

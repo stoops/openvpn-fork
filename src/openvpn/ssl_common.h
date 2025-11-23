@@ -246,15 +246,12 @@ struct key_state
 
     struct key_source2 *key_src;           /* source entropy for key expansion */
 
+    int op_code_recv;
+    int op_code_send;
+    struct buffer pkt_buf_recv;
+    struct buffer pkt_buf_send;
     struct buffer plaintext_read_buf;
     struct buffer plaintext_write_buf;
-    struct buffer ack_read_buf;
-    struct buffer ack_write_buf;
-
-    struct reliable *send_reliable; /* holds a copy of outgoing packets until ACK received */
-    struct reliable *rec_reliable;  /* order incoming ciphertext packets before we pass to TLS */
-    struct reliable_ack *rec_ack;   /* buffers all packet IDs we want to ACK back to sender */
-    struct reliable_ack *lru_acks;  /* keeps the most recently acked packages*/
 
     /** Holds outgoing message for the control channel until ks->state reaches
      * S_ACTIVE */
@@ -742,10 +739,6 @@ struct tls_multi
     struct buffer plaintext_read_buf;
     struct buffer plaintext_write_buf;
     struct buffer_list *paybuf;
-    struct reliable *send_reliable;
-    struct reliable *rec_reliable;
-    struct reliable_ack *rec_ack;
-    struct reliable_ack *lru_acks;
 
     bool keys_noop;
 

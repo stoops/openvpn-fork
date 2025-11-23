@@ -337,8 +337,7 @@ struct buffer *reliable_get_buf(struct reliable *rel);
  * @param pid The packet's packet ID.
  * @param opcode The packet's opcode.
  */
-void reliable_mark_active_incoming(struct reliable *rel, struct buffer *buf, packet_id_type pid,
-                                   int opcode);
+void reliable_mark_active_incoming(struct buffer *buf, packet_id_type pid, int opcode);
 
 /**
  * Record a packet ID for later acknowledgment.
@@ -437,7 +436,7 @@ int reliable_get_num_output_sequenced_available(struct reliable *rel);
  *     copied.
  * @param opcode The packet's opcode.
  */
-void reliable_mark_active_outgoing(struct reliable *rel, struct buffer *buf, int opcode);
+void reliable_mark_active_outgoing(struct buffer *buf, int opcode);
 
 /** @} name Functions for inserting outgoing packets */
 
