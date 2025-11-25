@@ -407,6 +407,31 @@ void multi_process_file_closed(struct multi_context *m, const unsigned int mpp_f
 
 #endif
 
+/*
+ * Set a msg() function prefix with our current client instance ID.
+ */
+
+static inline void
+set_prefix(struct multi_instance *mi)
+{
+#ifdef MULTI_DEBUG_EVENT_LOOP
+    if (mi->msg_prefix[0])
+    {
+        printf("[%s]\n", mi->msg_prefix);
+    }
+#endif
+    msg_set_prefix(mi->msg_prefix[0] ? mi->msg_prefix : NULL);
+}
+
+static inline void
+clear_prefix(void)
+{
+#ifdef MULTI_DEBUG_EVENT_LOOP
+    printf("[NULL]\n");
+#endif
+    msg_set_prefix(NULL);
+}
+
 static inline void
 multi_set_pending(struct multi_context *m, struct multi_instance *mi)
 {
@@ -419,6 +444,41 @@ multi_set_pending2(struct multi_context *m, struct multi_instance *mi)
     m->pending2 = mi;
 }
 
+/**
+ * Send a packet over the virtual tun/tap network interface to its locally
+ * reachable destination.
+ * @ingroup internal_multiplexer
+ *
+ * This function calls \c process_outgoing_tun() to perform the actual
+ * sending of the packet.  Afterwards, it calls \c multi_process_post() to
+ * perform server-mode postprocessing.
+ *
+ * @param m            - The single \c multi_context structure.
+ * @param mpp_flags    - Fast I/O optimization flags.
+ *
+ * @return
+ *  - True, if the \c multi_instance associated with the packet sent was
+ *    not closed due to a signal during processing.
+ *  - Falls, if the \c multi_instance was closed.
+ */
+static inline bool
+multi_process_outgoing_tun(struct multi_context *m, const unsigned int mpp_flags)
+{
+    struct multi_instance *mi = m->pending2;
+    struct context *c = &m->top;
+    struct context *d = &mi->context;
+    bool ret = true;
+    ASSERT(mi);
+    set_prefix(mi);
+    vlan_process_outgoing_tun(m, mi);
+    process_outgoing_tun(c, d->c2.link_sockets[0]);
+    c->c2.to_tun.len = 0;
+    d->c2.to_tun.len = 0;
+    mi->post = true;
+    clear_prefix();
+    return ret;
+}
+
 static inline void
 multi_tcp_process_incoming_link(struct multi_context *m, struct multi_instance *mi, unsigned int mpp_flags)
 {
@@ -429,6 +489,11 @@ multi_tcp_process_incoming_link(struct multi_context *m, struct multi_instance *
     if (!IS_SIG(&mi->context))
     {
         multi_process_incoming_link(m, mi, mpp_flags, mi->context.c2.link_sockets[0]);
+    }
+    if (!IS_SIG(&mi->context))
+    {
+        multi_process_outgoing_tun(m, mpp_flags);
+        multi_set_pending2(m, NULL);
     }
 }
 
@@ -543,31 +608,6 @@ multi_route_defined(const struct multi_context *m, const struct multi_route *r)
 void ungenerate_prefix(struct multi_instance *mi);
 
 /*
- * Set a msg() function prefix with our current client instance ID.
- */
-
-static inline void
-set_prefix(struct multi_instance *mi)
-{
-#ifdef MULTI_DEBUG_EVENT_LOOP
-    if (mi->msg_prefix[0])
-    {
-        printf("[%s]\n", mi->msg_prefix);
-    }
-#endif
-    msg_set_prefix(mi->msg_prefix[0] ? mi->msg_prefix : NULL);
-}
-
-static inline void
-clear_prefix(void)
-{
-#ifdef MULTI_DEBUG_EVENT_LOOP
-    printf("[NULL]\n");
-#endif
-    msg_set_prefix(NULL);
-}
-
-/*
  * Instance Reaper
  *
  * Reaper constants.  The reaper is the process where the virtual address
@@ -642,41 +682,6 @@ multi_get_timeout_instance(struct multi_context *m, struct timeval *dest)
         dest->tv_sec = REAP_MAX_WAKEUP;
         dest->tv_usec = 0;
     }
-}
-
-/**
- * Send a packet over the virtual tun/tap network interface to its locally
- * reachable destination.
- * @ingroup internal_multiplexer
- *
- * This function calls \c process_outgoing_tun() to perform the actual
- * sending of the packet.  Afterwards, it calls \c multi_process_post() to
- * perform server-mode postprocessing.
- *
- * @param m            - The single \c multi_context structure.
- * @param mpp_flags    - Fast I/O optimization flags.
- *
- * @return
- *  - True, if the \c multi_instance associated with the packet sent was
- *    not closed due to a signal during processing.
- *  - Falls, if the \c multi_instance was closed.
- */
-static inline bool
-multi_process_outgoing_tun(struct multi_context *m, const unsigned int mpp_flags)
-{
-    struct multi_instance *mi = m->pending2;
-    struct context *c = &m->top;
-    struct context *d = &mi->context;
-    bool ret = true;
-    ASSERT(mi);
-    set_prefix(mi);
-    vlan_process_outgoing_tun(m, mi);
-    process_outgoing_tun(c, d->c2.link_sockets[0]);
-    c->c2.to_tun.len = 0;
-    d->c2.to_tun.len = 0;
-    mi->post = true;
-    clear_prefix();
-    return ret;
 }
 
 #define CLIENT_CONNECT_OPT_MASK                                                            \

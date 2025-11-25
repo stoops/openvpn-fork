@@ -638,7 +638,7 @@ encrypt_sign(struct context *c, bool comp_frag)
     struct crypto_options *co = NULL;
     int op_v = (!c->c2.tls_multi->use_peer_id) ? 0 : 1;
 
-    if (c->c2.buf.len < 1 && c->c2.tls_multi->plaintext_write_buf.len)
+    if (c->c2.buf.len < 1 && REKEY_OUT(c))
     {
         op_v = 2;
         c->c2.buf = c->c2.tls_multi->plaintext_write_buf;
@@ -1927,7 +1927,7 @@ process_outgoing_link(struct context *c, struct link_socket *sock)
     struct gc_arena gc = gc_new();
     int error_code = 0;
 
-    if (c->c2.to_link.len < 1 && c->c2.tls_multi->plaintext_write_buf.len)
+    if (c->c2.to_link.len < 1 && REKEY_OUT(c))
     {
         c->c2.buf.len = 0;
         encrypt_sign(c, false);
@@ -2553,6 +2553,15 @@ void threaded_fwd_inp_intf(struct context *c, struct link_socket *sock, struct t
     }
 }
 
+void threaded_fwd_inp_link(struct context *c, struct link_socket *sock)
+{
+    read_incoming_link(c, sock);
+    if (!IS_SIG(c))
+    {
+        process_incoming_link(c, sock);
+    }
+}
+
 void
 process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b, int t)
 {
@@ -2566,35 +2575,42 @@ process_io(struct context *c, struct link_socket *sock, struct thread_pointer *b
     }
 #endif
 
-    /* TCP/UDP port ready to accept write */
-    if ((status & SOCKET_WRITE) && ((t & THREAD_RTWL) != 0))
+    if ((t & THREAD_RTWL) != 0)
     {
-        process_outgoing_link(c, sock);
-    }
-    /* TUN device ready to accept write */
-    else if ((status & TUN_WRITE) && ((t & THREAD_RLWT) != 0))
-    {
-        process_outgoing_tun(c, sock);
-    }
-    /* Incoming data on TCP/UDP port */
-    else if ((status & SOCKET_READ) && ((t & THREAD_RLWT) != 0))
-    {
-        read_incoming_link(c, sock);
-        if (!IS_SIG(c))
+        /* TCP/UDP port ready to accept write */
+        if (status & SOCKET_WRITE)
         {
-            process_incoming_link(c, sock);
+            process_outgoing_link(c, sock);
+        }
+        /* Incoming data on TUN device */
+        else if (status & TUN_READ)
+        {
+            threaded_fwd_inp_intf(c, sock, b);
         }
     }
-    /* Incoming data on TUN device */
-    else if ((status & TUN_READ) && ((t & THREAD_RTWL) != 0))
+
+    if ((t & THREAD_RLWT) != 0)
     {
-        threaded_fwd_inp_intf(c, sock, b);
-    }
-    else if ((status & DCO_READ) && ((t & THREAD_RTWL) != 0))
-    {
-        if (!IS_SIG(c))
+        /* TUN device ready to accept write */
+        if (status & TUN_WRITE)
         {
-            process_incoming_dco(c);
+            process_outgoing_tun(c, sock);
+        }
+        /* Incoming data on TCP/UDP port */
+        else if (status & SOCKET_READ)
+        {
+            threaded_fwd_inp_link(c, sock);
+        }
+    }
+
+    if (t == THREAD_MAIN)
+    {
+        if (status & DCO_READ)
+        {
+            if (!IS_SIG(c))
+            {
+                process_incoming_dco(c);
+            }
         }
     }
 }

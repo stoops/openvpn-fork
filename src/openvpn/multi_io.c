@@ -301,34 +301,28 @@ multi_io_post(struct multi_context *m, struct multi_instance *i, const int actio
     int newaction = TA_UNDEF;
     int getaction = TA_UNDEF;
 
-    if ((getaction = look_link(m)) != TA_UNDEF)
+    if ((t & THREAD_RTWL) != 0)
     {
-        if ((t & THREAD_RTWL) != 0)
+        if ((getaction = look_link(m)) != TA_UNDEF)
         {
             newaction = getaction;
             goto last;
         }
-    }
-    else if (INST_LENG(m))
-    {
-        if ((t & THREAD_RTWL) != 0)
+        else if (INST_LENG(m))
         {
             newaction = TA_INST_LENG;
             goto last;
         }
     }
 
-    if (TUN_OUT(c))
+    if ((t & THREAD_RLWT) != 0)
     {
-        if ((t & THREAD_RLWT) != 0)
+        if (TUN_OUT(c))
         {
             newaction = TA_TUN_WRITE;
             goto last;
         }
-    }
-    else if ((getaction = look_left(m)) != TA_UNDEF)
-    {
-        if ((t & THREAD_RLWT) != 0)
+        else if ((getaction = look_left(m)) != TA_UNDEF)
         {
             newaction = getaction;
             goto last;

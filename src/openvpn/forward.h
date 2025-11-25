@@ -43,8 +43,8 @@
 
 #define TUN_OUT(c)  (BLEN(&(c)->c2.to_tun) > 0)
 #define LINK_OUT(c) (BLEN(&(c)->c2.to_link) > 0)
-#define KEYRE_OUT(c) (c && c->c2.tls_multi && c->c2.tls_multi->plaintext_write_buf.len)
-#define ANY_OUT(c)  (TUN_OUT(c) || LINK_OUT(c) || KEYRE_OUT(c))
+#define REKEY_OUT(c) (c && c->c2.tls_multi && c->c2.tls_multi->keys_noop && c->c2.tls_multi->plaintext_write_buf.len)
+#define ANY_OUT(c)  (TUN_OUT(c) || LINK_OUT(c) || REKEY_OUT(c))
 
 #ifdef ENABLE_FRAGMENT
 #define TO_LINK_FRAG(c) ((c)->c2.fragment && fragment_outgoing_defined((c)->c2.fragment))
@@ -376,7 +376,7 @@ static inline unsigned int
 p2p_iow_flags(const struct context *c)
 {
     unsigned int flags = (IOW_SHAPER | IOW_CHECK_RESIDUAL | IOW_FRAG | IOW_READ | IOW_WAIT_SIGNAL);
-    if (LINK_OUT(c) || KEYRE_OUT(c))
+    if (LINK_OUT(c) || REKEY_OUT(c))
     {
         flags |= IOW_TO_LINK;
     }

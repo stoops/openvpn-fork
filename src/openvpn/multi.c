@@ -3809,16 +3809,20 @@ bool multi_process_inp_tun_post(struct multi_context *m, const unsigned int mpp_
     while (m->inst_indx < m->inst_leng)
     {
         struct multi_instance *i = m->inst_list[m->inst_indx];
-        if (i)
+        if (!i)
         {
-            multi_set_pending(m, i);
-            set_prefix(m->pending);
-            m->pending->post = true;
-            clear_prefix();
-            m->inst_list[m->inst_indx] = NULL;
+            m->inst_indx += 1;
+            continue;
         }
+        multi_set_pending(m, i);
+        set_prefix(m->pending);
+        process_outgoing_link(&i->context, i->context.c2.link_sockets[0]);
+        //m->pending->post = true;
+        clear_prefix();
+        m->inst_list[m->inst_indx] = NULL;
         m->inst_indx += 1;
-        break;
+        multi_set_pending(m, NULL);
+        //break;
     }
     return true;
 }
